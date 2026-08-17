@@ -1,0 +1,43 @@
+[package]
+name = "moonblokz-configuration"
+version = "0.1.0"
+edition = "2024"
+description = "MoonBlokz no_std chain-configuration module — parameter registry, code-baked defaults, three-tier resolution, content acceptance and the FR8 commitment state (FR56)."
+license = "MIT"
+repository = "https://github.com/petersallai/moonblokz-configuration"
+keywords = ["embedded", "no-std", "blockchain", "moonblokz", "configuration"]
+categories = ["embedded", "no-std"]
+
+[dependencies]
+# Backend-agnostic: do NOT pin a crypto backend here. The selected Schnorr
+# backend is chosen once at the top of the graph and forwarded down through the
+# `[features]` table below (a consumer overrides via `default-features = false`
+# + an alternate backend feature).
+moonblokz-chain-types = { path = "../moonblokz-chain-types", default-features = false }
+moonblokz-crypto = { path = "../moonblokz-crypto-lib", default-features = false }
+moonblokz-vm = { path = "../moonblokz-vm" }
+
+[features]
+# The crypto backend is forwarded to `moonblokz-chain-types` and
+# `moonblokz-crypto`. Exactly one must be active; the default is the
+# embedded-oriented crypto-bigint backend.
+default = ["schnorr-crypto-bigint"]
+schnorr-crypto-bigint = [
+    "moonblokz-chain-types/schnorr-crypto-bigint",
+    "moonblokz-crypto/schnorr-crypto-bigint",
+]
+schnorr-malachite = [
+    "moonblokz-chain-types/schnorr-malachite",
+    "moonblokz-crypto/schnorr-malachite",
+]
+schnorr-num-bigint-dig = [
+    "moonblokz-chain-types/schnorr-num-bigint-dig",
+    "moonblokz-crypto/schnorr-num-bigint-dig",
+]
+
+# The host-side `config-encoder` is a separate package rather than a feature of
+# this one. Cargo unifies features per package, so a `std` tool target sharing
+# this package could pull `std` into the library's own build and quietly break
+# the dependency gate.
+[workspace]
+members = ["tools/config-encoder"]
