@@ -106,6 +106,17 @@ const RUNAWAY_PROGRAM: [u8; 3] = [op::JMP, 0xFD, 0xFF];
 /// A single unassigned opcode byte.
 const UNDEFINED_OPCODE_PROGRAM: [u8; 1] = [0xC0];
 
+/// `PUSH_U8 41; RET` — a `'static` program, so it can stand in as a code-baked
+/// tier-2 default.
+const PUSH_41_PROGRAM: [u8; 3] = push_u8_program(41);
+
+/// `ARG 0; PUSH_U8 2; MUL; RET` — doubles its argument.
+const DOUBLE_ARG_PROGRAM: [u8; 6] = [op::ARG, 0, op::PUSH_U8, 2, op::MUL, op::RET];
+
+/// `ARG 3; RET` — an operand index above the arity, so it traps at runtime while
+/// acceptance cannot reach it.
+const ARG_OUT_OF_RANGE_PROGRAM: [u8; 3] = [op::ARG, 3, op::RET];
+
 // ---------------------------------------------------------------------------
 // Defaults — the neutrality bar
 // ---------------------------------------------------------------------------
@@ -157,11 +168,17 @@ fn empty_override_set_resolves_every_default() {
 
 #[test]
 fn every_default_satisfies_its_own_bound() {
-    // Absent parameters are not bound-checked at acceptance, so the defaults have
-    // to be in range by construction.
+    // Absent parameters are not bound-checked at acceptance, so both code-baked
+    // tiers have to be in range by construction. A literal default and its
+    // fallback are the same value; a program default is checked through its
+    // fallback, which is the value a failing program lands on.
     for spec in REGISTRY.iter() {
-        check_bound(spec.id, spec.default)
-            .expect("every code-baked default must satisfy its structural bound");
+        check_bound(spec.id, spec.fallback)
+            .expect("every code-baked fallback literal must satisfy its structural bound");
+        if let DefaultValue::Literal(default) = spec.default {
+            check_bound(spec.id, default)
+                .expect("every code-baked default must satisfy its structural bound");
+        }
     }
 }
 
@@ -328,6 +345,125 @@ fn each_accessor_invocation_starts_from_a_fresh_budget() {
 }
 
 // ---------------------------------------------------------------------------
+// Tier 2 — the code-baked default as a program
+// ---------------------------------------------------------------------------
+//
+// No parameter in the registry carries a program default, so these exercise the
+// resolution mechanism through a synthetic spec rather than through content. That
+// is the point: the tier has to work before a registry entry relies on it.
+
+#[test]
+fn a_program_default_resolves_as_tier_two() {
+    let module = loaded(&[]);
+    let config = module.active_configuration().expect("handle");
+    let spec = spec_of_program(parameter::CUSTODIAN_FEE, 8, 0, true, &PUSH_41_PROGRAM, 7);
+
+    let mut fuel = Fuel::new(config.fuel_limit());
+    assert_eq!(config.resolve_with(&spec, &[], &mut fuel), 41);
+}
+
+#[test]
+fn a_program_default_that_fails_falls_through_to_the_fallback_literal() {
+    let module = loaded(&[]);
+    let config = module.active_configuration().expect("handle");
+    let spec = spec_of_program(
+        parameter::CUSTODIAN_FEE,
+        8,
+        0,
+        true,
+        &UNDEFINED_OPCODE_PROGRAM,
+        7,
+    );
+
+    let mut fuel = Fuel::new(config.fuel_limit());
+    assert_eq!(config.resolve_with(&spec, &[], &mut fuel), 7);
+}
+
+#[test]
+fn tier_two_starts_from_a_fresh_budget_after_tier_one_exhausts_one() {
+    // The override traps at runtime — an operand index above the arity, which
+    // acceptance cannot reach because the parameter takes an argument — and the
+    // incoming budget is empty, which is what an exhausted tier-1 evaluation
+    // leaves behind. Tier 2 must still run, or every fuel-caused failure would
+    // skip it and the tier would be dead code in exactly the case it exists for.
+    let module = loaded(&[Entry::Bytecode(
+        parameter::REGISTRATION_PRICE,
+        &ARG_OUT_OF_RANGE_PROGRAM,
+    )]);
+    let config = module.active_configuration().expect("handle");
+    let spec = spec_of_program(
+        parameter::REGISTRATION_PRICE,
+        8,
+        1,
+        true,
+        &DOUBLE_ARG_PROGRAM,
+        7,
+    );
+
+    let mut exhausted = Fuel::new(0);
+    // The argument reaches tier 2 with the same semantics the accessor has.
+    assert_eq!(config.resolve_with(&spec, &[21], &mut exhausted), 42);
+}
+
+// ---------------------------------------------------------------------------
+// Nesting and cycles
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_self_referential_program_resolves_to_the_default_it_cannot_reach() {
+    // `grace_period_window_ms = GETPARAM grace_period_window_ms`. The host
+    // re-enters the VM, and the depth counter travels in `Fuel`, so the recursion
+    // stops at the fixed nesting limit rather than on the native stack. The
+    // innermost `GETPARAM` traps, that tier fails, and the sub-evaluation returns
+    // the code-baked default — so the outer program *completes*, carrying the
+    // default outward. Acceptance therefore accepts the content: a cycle is a
+    // runtime condition with the ordinary fallback outcome, not invalidity.
+    let program = getparam_program(parameter::GRACE_PERIOD_WINDOW_MS, 0);
+    let module = loaded(&[Entry::Bytecode(parameter::GRACE_PERIOD_WINDOW_MS, &program)]);
+    let config = module.active_configuration().expect("handle");
+
+    assert_eq!(config.grace_period_window_ms(), 30_000);
+    // Deterministic, which is what makes it safe: the depth limit and the fuel
+    // budget are both chain-fixed, so every node reaches the same value.
+    assert_eq!(config.grace_period_window_ms(), 30_000);
+}
+
+#[test]
+fn a_two_parameter_cycle_terminates_the_same_way() {
+    let first = getparam_program(parameter::GRACE_PERIOD_WINDOW_MS, 0);
+    let second = getparam_program(parameter::INTER_BLOCK_INTERVAL_MS, 0);
+    let module = loaded(&[
+        Entry::Bytecode(parameter::INTER_BLOCK_INTERVAL_MS, &first),
+        Entry::Bytecode(parameter::GRACE_PERIOD_WINDOW_MS, &second),
+    ]);
+    let config = module.active_configuration().expect("handle");
+
+    // Each side bottoms out on the other's default once the nesting limit bites.
+    assert_eq!(config.inter_block_interval_ms(), 30_000);
+    assert_eq!(config.grace_period_window_ms(), 60_000);
+}
+
+#[test]
+fn a_cycle_through_an_argument_taking_parameter_terminates_at_runtime() {
+    // Acceptance does not evaluate an argument-taking program, so this cycle is
+    // reachable at resolution time — the case that would be a stack overflow if
+    // the nesting depth did not survive the host re-entry. It resolves to the
+    // default instead.
+    let program = [
+        op::ARG,
+        0,
+        op::GETPARAM,
+        parameter::REGISTRATION_PRICE,
+        1,
+        op::RET,
+    ];
+    let module = loaded(&[Entry::Bytecode(parameter::REGISTRATION_PRICE, &program)]);
+    let config = module.active_configuration().expect("handle");
+
+    assert_eq!(config.registration_price(3), 100);
+}
+
+// ---------------------------------------------------------------------------
 // Registry conformance
 // ---------------------------------------------------------------------------
 
@@ -485,6 +621,25 @@ fn block_size_limit_is_bounded_by_the_block_buffer() {
             parameter::BLOCK_SIZE_LIMIT
         ))
     ));
+
+    // A limit that cannot admit a header admits no block at all, and every
+    // remaining-capacity computation against it underflows.
+    let above_header = frame(&[Entry::Literal(
+        parameter::BLOCK_SIZE_LIMIT,
+        &(HEADER_SIZE as u16 + 1).to_le_bytes(),
+    )]);
+    assert!(accept_content(above_header.as_slice()).is_ok());
+
+    let at_header = frame(&[Entry::Literal(
+        parameter::BLOCK_SIZE_LIMIT,
+        &(HEADER_SIZE as u16).to_le_bytes(),
+    )]);
+    assert!(matches!(
+        accept_content(at_header.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::BLOCK_SIZE_LIMIT
+        ))
+    ));
 }
 
 #[test]
@@ -505,6 +660,24 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
             parameter::ACTIVE_CHAIN_LENGTH
         ))
     ));
+
+    // A window has to hold at least one block.
+    let at_one = frame(&[Entry::Literal(
+        parameter::ACTIVE_CHAIN_LENGTH,
+        &1u16.to_le_bytes(),
+    )]);
+    assert!(accept_content(at_one.as_slice()).is_ok());
+
+    let zero = frame(&[Entry::Literal(
+        parameter::ACTIVE_CHAIN_LENGTH,
+        &0u16.to_le_bytes(),
+    )]);
+    assert!(matches!(
+        accept_content(zero.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::ACTIVE_CHAIN_LENGTH
+        ))
+    ));
 }
 
 #[test]
@@ -513,6 +686,15 @@ fn max_block_utxo_output_is_bounded_by_the_spent_bit_width() {
     // the widest legal literal is in range on this build...
     let at_width_max = frame(&[Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &[255])]);
     assert!(accept_content(at_width_max.as_slice()).is_ok());
+
+    // At zero no transaction output could ever be included in a block.
+    let zero = frame(&[Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &[0])]);
+    assert!(matches!(
+        accept_content(zero.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::MAX_BLOCK_UTXO_OUTPUT
+        ))
+    ));
     assert!(check_bound(parameter::MAX_BLOCK_UTXO_OUTPUT, UTXO_UNSPENT_BITS as u64).is_ok());
 
     // ... a value above it is rejected twice over: by the bound, and — because a
@@ -534,6 +716,138 @@ fn max_block_utxo_output_is_bounded_by_the_spent_bit_width() {
         accept_content(too_wide.as_slice()),
         Err(ChainConfigError::ValueWidthMismatch(
             parameter::MAX_BLOCK_UTXO_OUTPUT
+        ))
+    ));
+}
+
+#[test]
+fn max_aggregated_signatures_is_bounded_by_the_backend_ceiling() {
+    // The chain states how many signatures an approval-evidence block may carry;
+    // this build states how many it can aggregate and verify.
+    let at_bound = frame(&[Entry::Literal(
+        parameter::MAX_AGGREGATED_SIGNATURES,
+        &[MAX_AGGREGATED_SIGNATURES as u8],
+    )]);
+    assert!(accept_content(at_bound.as_slice()).is_ok());
+
+    let over = frame(&[Entry::Literal(
+        parameter::MAX_AGGREGATED_SIGNATURES,
+        &[MAX_AGGREGATED_SIGNATURES as u8 + 1],
+    )]);
+    assert!(matches!(
+        accept_content(over.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::MAX_AGGREGATED_SIGNATURES
+        ))
+    ));
+
+    let zero = frame(&[Entry::Literal(parameter::MAX_AGGREGATED_SIGNATURES, &[0])]);
+    assert!(matches!(
+        accept_content(zero.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::MAX_AGGREGATED_SIGNATURES
+        ))
+    ));
+}
+
+#[test]
+fn block_fill_threshold_is_a_percentage() {
+    let at_bound = frame(&[Entry::Literal(
+        parameter::BLOCK_FILL_THRESHOLD_PERCENT,
+        &[100],
+    )]);
+    assert!(accept_content(at_bound.as_slice()).is_ok());
+
+    let over = frame(&[Entry::Literal(
+        parameter::BLOCK_FILL_THRESHOLD_PERCENT,
+        &[101],
+    )]);
+    assert!(matches!(
+        accept_content(over.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::BLOCK_FILL_THRESHOLD_PERCENT
+        ))
+    ));
+}
+
+#[test]
+fn the_fuel_limit_is_bounded_at_both_ends() {
+    let at_bound = frame(&[Entry::Literal(
+        parameter::VM_FUEL_LIMIT,
+        &VM_FUEL_LIMIT_MAX.to_le_bytes(),
+    )]);
+    assert!(accept_content(at_bound.as_slice()).is_ok());
+
+    // Unbounded above, one content could hold the core for as long as it asked —
+    // acceptance pays the limit once per argument-less program.
+    let over = frame(&[Entry::Literal(
+        parameter::VM_FUEL_LIMIT,
+        &(VM_FUEL_LIMIT_MAX + 1).to_le_bytes(),
+    )]);
+    assert!(matches!(
+        accept_content(over.as_slice()),
+        Err(ChainConfigError::BoundViolation(parameter::VM_FUEL_LIMIT))
+    ));
+
+    // At zero every program silently resolves to its default, with no diagnostic
+    // anywhere.
+    let zero = frame(&[Entry::Literal(
+        parameter::VM_FUEL_LIMIT,
+        &0u32.to_le_bytes(),
+    )]);
+    assert!(matches!(
+        accept_content(zero.as_slice()),
+        Err(ChainConfigError::BoundViolation(parameter::VM_FUEL_LIMIT))
+    ));
+}
+
+#[test]
+fn an_over_budget_fuel_limit_is_refused_before_it_is_spent() {
+    // The ordering is the point: were the limit checked in entry order, a content
+    // pairing a huge limit with a runaway program would already have held the core
+    // for as long as the unchecked value asked before the bound was reached. The
+    // runaway program is framed *first*, so entry order alone would reach it first.
+    let payload = frame(&[
+        Entry::Bytecode(parameter::VOTE_INTEREST, &RUNAWAY_PROGRAM),
+        Entry::Literal(parameter::VM_FUEL_LIMIT, &u32::MAX.to_le_bytes()),
+    ]);
+    assert!(matches!(
+        accept_content(payload.as_slice()),
+        Err(ChainConfigError::BoundViolation(parameter::VM_FUEL_LIMIT))
+    ));
+}
+
+#[test]
+fn the_transaction_fee_range_may_not_be_inverted() {
+    // The one invariant that spans two parameters, so it cannot live in a
+    // per-parameter check.
+    let equal = frame(&[
+        Entry::Literal(parameter::TX_FEE_PER_BYTE_MIN, &7u64.to_le_bytes()),
+        Entry::Literal(parameter::TX_FEE_PER_BYTE_MAX, &7u64.to_le_bytes()),
+    ]);
+    assert!(accept_content(equal.as_slice()).is_ok());
+
+    let inverted = frame(&[
+        Entry::Literal(parameter::TX_FEE_PER_BYTE_MIN, &8u64.to_le_bytes()),
+        Entry::Literal(parameter::TX_FEE_PER_BYTE_MAX, &7u64.to_le_bytes()),
+    ]);
+    assert!(matches!(
+        accept_content(inverted.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::TX_FEE_PER_BYTE_MIN
+        ))
+    ));
+
+    // An omitted parameter contributes its default, which is the value the chain
+    // will resolve for it: a minimum above the default maximum is still inverted.
+    let over_default_max = frame(&[Entry::Literal(
+        parameter::TX_FEE_PER_BYTE_MIN,
+        &2000u64.to_le_bytes(),
+    )]);
+    assert!(matches!(
+        accept_content(over_default_max.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::TX_FEE_PER_BYTE_MIN
         ))
     ));
 }

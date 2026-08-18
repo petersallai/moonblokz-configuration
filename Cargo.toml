@@ -15,7 +15,11 @@ categories = ["embedded", "no-std"]
 # + an alternate backend feature).
 moonblokz-chain-types = { path = "../moonblokz-chain-types", default-features = false }
 moonblokz-crypto = { path = "../moonblokz-crypto-lib", default-features = false }
-moonblokz-vm = { path = "../moonblokz-vm" }
+# `default-features = false` on every MoonBlokz edge, not only the two that carry
+# a backend feature: the dependency-graph gate is only as strong as its weakest
+# declaration, and a default `std`/`alloc` feature added upstream would otherwise
+# arrive silently.
+moonblokz-vm = { path = "../moonblokz-vm", default-features = false }
 
 [features]
 # The crypto backend is forwarded to `moonblokz-chain-types` and

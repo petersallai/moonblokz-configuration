@@ -93,6 +93,12 @@ fn run() -> Result<(), String> {
 fn read_key(path: &str) -> Result<[u8; PRIVATE_KEY_SIZE], String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let digits: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    // Checked before the length, and before any slicing: `len()` counts bytes, so
+    // a single multi-byte character could satisfy the length check and then split
+    // on a char boundary — a panic where a diagnostic belongs.
+    if let Some(offender) = digits.chars().find(|c| !c.is_ascii_hexdigit()) {
+        return Err(format!("{path}: `{offender}` is not a hex digit"));
+    }
     if digits.len() != PRIVATE_KEY_SIZE * 2 {
         return Err(format!(
             "{path}: expected {} hex digits, found {}",

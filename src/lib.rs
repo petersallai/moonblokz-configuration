@@ -42,7 +42,7 @@ that runs in the blockchain, over the envelope
 use core::num::NonZeroU16;
 
 use moonblokz_chain_types::{
-    ChainConfigBlockPayloadView, ConfigValueView, MAX_BLOCK_SIZE, MAX_PAYLOAD_SIZE,
+    ChainConfigBlockPayloadView, ConfigValueView, HEADER_SIZE, MAX_BLOCK_SIZE, MAX_PAYLOAD_SIZE,
 };
 use moonblokz_crypto::MAX_AGGREGATED_SIGNATURES;
 use moonblokz_vm::{Fuel, HOST_RESOLVE_PARAMETER, Vm, VmHost, VmOutcome};
@@ -73,6 +73,20 @@ pub const SNAKE_CHAIN_LENGTH_MAX: u16 = 500;
 
 /// Length of the radio scoring matrix, the one array-typed parameter.
 pub const SCORING_MATRIX_LEN: usize = 5;
+
+/// Ceiling on the chain-declared `vm_fuel_limit`.
+///
+/// The limit bounds how long one program evaluation may hold the core, and
+/// acceptance pays that bound once per argument-less program — up to the 126
+/// entries the key space allows — so an unbounded limit would let one content
+/// hold the core for as long as it asked, against a watchdog.
+///
+/// **Provisional at five times the code-baked default**, and recorded as such:
+/// specification §12 grounds the default at roughly 9 ms on a static 55–70
+/// cycles-per-instruction estimate whose timing half is not yet confirmed on
+/// hardware, so this value inherits that uncertainty and is expected to be
+/// re-based on measurement rather than argument.
+pub const VM_FUEL_LIMIT_MAX: u32 = 100_000;
 
 // ---------------------------------------------------------------------------
 // The machine
@@ -105,6 +119,13 @@ type ConfigVm = Vm<VM_STACK_DEPTH, VM_LOCAL_SLOTS, VM_MAX_NESTING>;
 /// The key space is flat and shared by every consuming subsystem — blockchain,
 /// radio and the VM alike — so that a single authority allocates identifiers and
 /// two subsystems cannot pick the same one.
+///
+/// **The defaults are permanent too**, for a less obvious reason than the
+/// identifiers: a chain that omits a parameter validates against this build's
+/// default for it, so two firmware versions whose default tables differ by one
+/// value validate the same chain differently — with no error on either side, which
+/// is the same silent split the unknown-key rule exists to prevent. Changing a
+/// value in the table below is a consensus-breaking change, not a tuning decision.
 ///
 /// **Next free identifier: 30.**
 pub mod parameter {
@@ -188,18 +209,39 @@ pub struct ParameterSpec {
     /// Accessor arity — hence the argument count a `GETPARAM` naming this
     /// identifier must declare.
     pub args: u8,
-    /// Whether a bytecode override is permitted. A parameter carrying a
-    /// structural bound that could otherwise depend on runtime arguments is
-    /// literal-only, so its declared value is checkable at acceptance.
+    /// Whether a bytecode *override* is permitted.
+    ///
+    /// Literal-only parameters are those whose value must be knowable at
+    /// acceptance time under every condition: the array-typed one (the VM has no
+    /// array-valued result form), the execution-budget parameter itself
+    /// (resolving it must not require running a program), and those carrying a
+    /// bound that an argument-taking program could evade. A bound *alone* does
+    /// not force literal-only — an argument-less program is evaluated once at
+    /// acceptance and bound-checked exactly like a literal.
     pub bytecode_allowed: bool,
-    /// Code-baked default, and — because no default in this registry is a
-    /// program — also the code-baked fallback literal. A distinct fallback is
-    /// only meaningful for a bytecode default, and there is none today; adding
-    /// one adds its program and its own fresh budget beside this field.
-    pub default: u64,
+    /// Tier 2 — the code-baked default, itself either a literal or a program.
+    pub default: DefaultValue,
+    /// Tier 3 — the code-baked fallback literal, used when the tier above fails
+    /// at evaluation time. For a literal default the two coincide, which is why
+    /// the table's shorthand writes such a parameter's value once.
+    pub fallback: u64,
 }
 
-/// A shorthand for the table below.
+/// What a parameter's code-baked default is.
+///
+/// A default may be a program with the same argument semantics as the accessor,
+/// which is what makes tier 2 a real tier rather than a synonym for tier 3
+/// (specification §5.1, PRD FR56). No parameter in the registry uses the program
+/// form today; the representation exists so that adding one is a table edit
+/// rather than a change to the resolution model.
+pub enum DefaultValue {
+    /// A plain constant.
+    Literal(u64),
+    /// A program, evaluated with its own fresh fuel budget.
+    Program(&'static [u8]),
+}
+
+/// A parameter whose default is a literal: tiers 2 and 3 are that one value.
 const fn spec_of(
     id: u8,
     width: u8,
@@ -212,7 +254,30 @@ const fn spec_of(
         width,
         args,
         bytecode_allowed,
-        default,
+        default: DefaultValue::Literal(default),
+        fallback: default,
+    }
+}
+
+/// A parameter whose default is a program, with the fallback literal behind it.
+///
+/// Unused by the current table — see [`DefaultValue`].
+#[allow(dead_code)]
+const fn spec_of_program(
+    id: u8,
+    width: u8,
+    args: u8,
+    bytecode_allowed: bool,
+    default: &'static [u8],
+    fallback: u64,
+) -> ParameterSpec {
+    ParameterSpec {
+        id,
+        width,
+        args,
+        bytecode_allowed,
+        default: DefaultValue::Program(default),
+        fallback,
     }
 }
 
@@ -304,6 +369,43 @@ const _: () = {
         index += 1;
     }
 };
+
+/// Number of identifiers the registry allocates. The next free identifier is
+/// `PARAMETER_COUNT + 1` while allocation stays dense.
+pub const PARAMETER_COUNT: usize = REGISTRY.len();
+
+/// The identifiers [`check_bound`] constrains.
+///
+/// Named as a table rather than left implicit in the `match`, so that the
+/// registry invariant behind it can be asserted at compile time: a bound is only
+/// enforceable on a value knowable at acceptance time, and an argument-taking
+/// parameter's value is not, so a bounded parameter must have arity zero
+/// (specification §6).
+const BOUNDED_IDS: [u8; 10] = [
+    parameter::BLOCK_SIZE_LIMIT,
+    parameter::MAX_BLOCK_UTXO_OUTPUT,
+    parameter::MAX_AGGREGATED_SIGNATURES,
+    parameter::VOTE_SCALE,
+    parameter::REQUIRED_SUPPORT,
+    parameter::BLOCK_FILL_THRESHOLD_PERCENT,
+    parameter::ACTIVE_CHAIN_LENGTH,
+    parameter::TX_FEE_PER_BYTE_MIN,
+    parameter::TX_FEE_PER_BYTE_MAX,
+    parameter::VM_FUEL_LIMIT,
+];
+
+const _: () = {
+    let mut index = 0;
+    while index < BOUNDED_IDS.len() {
+        assert!(REGISTRY[BOUNDED_IDS[index] as usize - 1].args == 0);
+        index += 1;
+    }
+};
+
+// The retained payload's length fields are `u16`. Truncating them would leave the
+// retained slices short — a signature over the wrong bytes, and an FR8 comparison
+// against the wrong bytes, with no panic to notice.
+const _: () = assert!(MAX_PAYLOAD_SIZE <= u16::MAX as usize);
 
 /// Whether the registry allocates `id`. An unallocated identifier is **rejected,
 /// never skipped**: a node substituting its own default for a parameter it does
@@ -415,6 +517,11 @@ impl ConfigChangeSink for NoopConfigChangeSink {
     fn on_configuration_changed(&self, _config: &ActiveConfig<'_>) {}
 }
 
+// The no-op sink optimising away is a property consumers are promised, not an
+// accident of today's definition: a field added here would silently cost every
+// blockchain-only configuration a byte and a branch.
+const _: () = assert!(core::mem::size_of::<NoopConfigChangeSink>() == 0);
+
 // ---------------------------------------------------------------------------
 // The seam
 // ---------------------------------------------------------------------------
@@ -504,13 +611,10 @@ impl<Sink: ConfigChangeSink> ChainConfiguration<Sink> {
         if self.is_durable_locked() {
             return Err(ChainConfigError::DurableLocked);
         }
-        // A block payload cannot exceed this, but the seam is public and the
-        // retention buffer is fixed, so the bound is checked rather than assumed.
-        if payload.len() > MAX_PAYLOAD_SIZE {
-            return Err(ChainConfigError::MalformedContent);
-        }
         // Acceptance runs before anything is retained, so a refusal leaves the
-        // previous state exactly as it was.
+        // previous state exactly as it was. The retention bound is part of that
+        // pass, not a separate check here, so `config-encoder`'s guarantee — what
+        // the tool accepts, the network accepts — covers it too.
         let content_len = accept_content(payload)?;
 
         self.payload[..payload.len()].copy_from_slice(payload);
@@ -541,7 +645,11 @@ impl<Sink: ConfigChangeSink> ChainConfiguration<Sink> {
 impl<Sink: ConfigChangeSink> ChainConfigTrait for ChainConfiguration<Sink> {
     fn active_configuration(&self) -> Option<ActiveConfig<'_>> {
         Some(ActiveConfig {
-            payload: self.retained_payload(),
+            // The payload was accepted before it was retained, so the walk
+            // succeeds; answering `None` if it ever did not is the safe total
+            // behaviour — a handle over content this build cannot read would be
+            // worse than no handle.
+            view: ChainConfigBlockPayloadView::from_payload(self.retained_payload())?,
             commitment: self.commitment?,
         })
     }
@@ -604,8 +712,12 @@ impl<Sink: ConfigChangeSink> ChainConfigTrait for ChainConfiguration<Sink> {
 /// **every accessor on an obtained handle returns a value** — there is no
 /// not-available case to handle per parameter.
 pub struct ActiveConfig<'a> {
-    /// The validated chain-config payload: content region plus signature.
-    payload: &'a [u8],
+    /// The envelope, walked and validated **once** when the handle was acquired.
+    /// Every accessor re-resolves against it, but none re-validates the framing:
+    /// re-deriving the content boundary per accessor — twice per accessor, in
+    /// fact, and again per nested `GETPARAM` — was measurable work for no
+    /// information.
+    view: ChainConfigBlockPayloadView<'a>,
     commitment: Commitment,
 }
 
@@ -649,9 +761,10 @@ impl<'a> ActiveConfig<'a> {
     /// FR37 `vote_scale` — the per-credit vote value, and the anti-capture
     /// interest denominator, which is why zero is refused at acceptance.
     pub fn vote_scale(&self) -> NonZeroU16 {
-        // Literal-only and non-zero by acceptance, so the fallback literal is
-        // the only thing that could produce this branch — which is exactly the
-        // resolution tier it belongs to.
+        // Acceptance refuses a declared zero and the parameter is literal-only,
+        // so accepted content cannot reach the `unwrap_or`: it is tier 3, the
+        // code-baked fallback literal, and this is the one accessor whose return
+        // type makes that tier visible in the signature.
         NonZeroU16::new(narrow_u16(self.resolve(parameter::VOTE_SCALE, &[])))
             .unwrap_or(FALLBACK_VOTE_SCALE)
     }
@@ -789,41 +902,49 @@ impl<'a> ActiveConfig<'a> {
 
     // -- Resolution --
 
-    /// Resolves `id` over `args` through the three tiers, with a fresh fuel
-    /// budget for the tier that needs one.
+    /// Resolves `id` over `args` through the three tiers.
     ///
-    /// A fresh budget per tier matters: if a lower tier inherited an exhausted
-    /// budget, then whenever exhaustion was the failure cause the tier below
-    /// could never run, and it would be dead code.
+    /// Tier 1 is the chain-config override, tier 2 the code-baked default, tier 3
+    /// the code-baked fallback literal. **Each tier that needs a budget starts a
+    /// fresh one**: if a lower tier inherited an exhausted budget, then whenever
+    /// exhaustion was the failure cause the tier below could never run, and it
+    /// would be dead code. Sharing happens along the other axis — a nested
+    /// `GETPARAM` draws from the budget of the invocation that started it, so a
+    /// program cannot evade the bound by composing sub-evaluations.
     fn resolve(&self, id: u8, args: &[u64]) -> u64 {
         let mut fuel = Fuel::new(self.fuel_limit());
         self.resolve_with(spec(id), args, &mut fuel)
     }
 
-    /// Resolution against a caller-supplied budget — the nesting path, where a
-    /// sub-evaluation draws from the budget of the invocation that started it.
+    /// Resolution against a caller-supplied budget — the nesting path.
     fn resolve_with(&self, spec: &ParameterSpec, args: &[u64], fuel: &mut Fuel) -> u64 {
-        // Tier 1 — the chain-config override.
+        // Tier 1 — the chain-config override, on the caller's budget.
         if let Some(entry) = self.entry(spec.id)
             && let Some(value) = self.evaluate(&entry, spec, args, fuel)
         {
             return value;
         }
-        // Tiers 2 and 3 — the code-baked default, which is also the fallback
-        // literal: no default in the registry is a program, so the two tiers
-        // coincide and there is one constant per parameter rather than two
-        // identical ones.
-        spec.default
+        // Tier 2 — the code-baked default. A program default gets its own fresh
+        // budget, which is the whole reason the tiers are separate.
+        match spec.default {
+            DefaultValue::Literal(value) => return value,
+            DefaultValue::Program(program) => {
+                let mut tier_fuel = Fuel::new(self.fuel_limit());
+                if let VmOutcome::Completed(value) =
+                    ConfigVm::execute(program, args, &mut tier_fuel, self)
+                {
+                    return value;
+                }
+            }
+        }
+        // Tier 3 — the code-baked fallback literal. A constant, which is what
+        // makes the accessor surface total.
+        spec.fallback
     }
 
     /// The entry for `id` in the loaded content, if the content overrides it.
     fn entry(&self, id: u8) -> Option<ConfigValueView<'a>> {
-        // The payload was accepted before it was retained, so this reconstruction
-        // succeeds; a `None` here would mean no override, which is the same
-        // conclusion the absence of an entry reaches.
-        ChainConfigBlockPayloadView::from_payload(self.payload)?
-            .iter()
-            .find(|entry| entry.parameter_id() == id)
+        self.view.iter().find(|entry| entry.parameter_id() == id)
     }
 
     /// Evaluates one override entry, or `None` when the tier fails.
@@ -857,13 +978,7 @@ impl<'a> ActiveConfig<'a> {
     /// `vm_fuel_limit` is literal-only precisely so that this cannot recurse:
     /// bounding every evaluation must not itself require running a program.
     fn fuel_limit(&self) -> u32 {
-        let spec = spec(parameter::VM_FUEL_LIMIT);
-        match self.entry(spec.id) {
-            Some(entry) if !entry.is_bytecode() && entry.value().len() == spec.width as usize => {
-                narrow_u32(read_le(entry.value()))
-            }
-            _ => narrow_u32(spec.default),
-        }
+        narrow_u32(declared_fuel_limit(&self.view))
     }
 }
 
@@ -882,6 +997,25 @@ impl VmHost for ActiveConfig<'_> {
         // The nested evaluation draws from the caller's budget, so exhaustion
         // aborts the whole invocation rather than just this sub-evaluation.
         Some(self.resolve_with(spec, args, fuel))
+    }
+}
+
+/// The declared `vm_fuel_limit` of a content region, or its code-baked default.
+///
+/// One reader for a consensus-visible number that both resolution and acceptance
+/// need: two paths to it would be one edit away from disagreeing. The parameter is
+/// literal-only precisely so that reading it cannot recurse — bounding every
+/// evaluation must not itself require running a program (specification §4.3).
+fn declared_fuel_limit(view: &ChainConfigBlockPayloadView<'_>) -> u64 {
+    let spec = spec(parameter::VM_FUEL_LIMIT);
+    let declared = view
+        .iter()
+        .find(|entry| entry.parameter_id() == spec.id)
+        .filter(|entry| !entry.is_bytecode() && entry.value().len() == spec.width as usize)
+        .map(|entry| read_le(entry.value()));
+    match declared {
+        Some(value) => value,
+        None => spec.fallback,
     }
 }
 
@@ -957,17 +1091,26 @@ fn narrow_u32(value: u64) -> u32 {
 ///    cannot vary, so checking it once is sound — and running the real decoder
 ///    on the real program is what stands in for a bytecode verifier.
 pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
+    // The retention buffer is fixed, so content this node could not hold is not
+    // content it can accept. Checked here rather than at the load site so that the
+    // public pass is the whole acceptance rule.
+    if payload.len() > MAX_PAYLOAD_SIZE {
+        return Err(ChainConfigError::MalformedContent);
+    }
+
     let view = ChainConfigBlockPayloadView::from_payload(payload)
         .ok_or(ChainConfigError::MalformedContent)?;
 
+    // Pass 1 — registry conformance. Runs to completion before anything is
+    // evaluated, so a program never runs against entries that have not been
+    // checked.
     for entry in view.iter() {
         let id = entry.parameter_id();
-        if !is_allocated(id) {
+        let Some(spec) = parameter_spec(id) else {
             // `chain-config-unknown-key`: the key byte travels with the error so
             // the log record can name it (FR64 wires the emission).
             return Err(ChainConfigError::UnknownParameter(entry.key_byte()));
-        }
-        let spec = spec(id);
+        };
         if entry.is_bytecode() {
             if !spec.bytecode_allowed {
                 return Err(ChainConfigError::BytecodeNotPermitted(id));
@@ -977,15 +1120,26 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
         }
     }
 
+    // Pass 2 — the execution budget, before it is spent. `vm_fuel_limit` bounds
+    // every evaluation below, and acceptance pays that bound once per
+    // argument-less program, so a declared limit is checked *before* it is used:
+    // validating it afterwards would mean a runaway program had already held the
+    // core for as long as the unchecked value asked.
+    check_bound(parameter::VM_FUEL_LIMIT, declared_fuel_limit(&view))?;
+
     // Evaluation runs against the candidate content itself, so a program that
     // reads another parameter of the same content sees the values the chain
     // declared rather than this node's defaults.
     let candidate = ActiveConfig {
-        payload,
+        view,
         commitment: Commitment::Tentative,
     };
 
-    for entry in view.iter() {
+    // Pass 3 — the declared values, and the bounds on them.
+    let mut tx_fee_min = None;
+    let mut tx_fee_max = None;
+
+    for entry in candidate.view.iter() {
         let spec = spec(entry.parameter_id());
         let declared = if entry.is_bytecode() {
             if spec.args != 0 {
@@ -1005,9 +1159,30 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
         };
 
         check_bound(spec.id, declared)?;
+
+        match spec.id {
+            parameter::TX_FEE_PER_BYTE_MIN => tx_fee_min = Some(declared),
+            parameter::TX_FEE_PER_BYTE_MAX => tx_fee_max = Some(declared),
+            _ => {}
+        }
     }
 
-    Ok(view.content().len())
+    // Pass 4 — the one invariant that spans two parameters, and therefore cannot
+    // live in a per-parameter check. An omitted parameter contributes its default,
+    // which is the value the chain will resolve for it.
+    let declared_or_default = |declared: Option<u64>, id: u8| match declared {
+        Some(value) => value,
+        None => spec(id).fallback,
+    };
+    if declared_or_default(tx_fee_min, parameter::TX_FEE_PER_BYTE_MIN)
+        > declared_or_default(tx_fee_max, parameter::TX_FEE_PER_BYTE_MAX)
+    {
+        return Err(ChainConfigError::BoundViolation(
+            parameter::TX_FEE_PER_BYTE_MIN,
+        ));
+    }
+
+    Ok(candidate.view.content().len())
 }
 
 /// The structural bounds, applied to a declared value.
@@ -1016,23 +1191,45 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
 /// constant states what this build can honour. A parameter with no bound passes.
 fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
     let within = match id {
-        // FR8: a larger value cannot be represented by the local node's
-        // per-block spent-bit cache. Unreachable through a legal literal while
-        // the width is one byte — a wider value fails the exact-width rule
-        // first — but it is the pin that catches a build with a narrower cache.
-        parameter::MAX_BLOCK_UTXO_OUTPUT => declared <= UTXO_UNSPENT_BITS as u64,
+        // FR8: above the local per-block spent-bit width the cache cannot
+        // represent the outputs; at zero no transaction output could ever be
+        // included. The upper end is unreachable through a legal literal while the
+        // width is one byte — a wider value fails the exact-width rule first — but
+        // it is the pin that catches a build with a narrower cache.
+        parameter::MAX_BLOCK_UTXO_OUTPUT => declared >= 1 && declared <= UTXO_UNSPENT_BITS as u64,
         // FR8 / ADR-015: below 1, `m = min(2·required_support − 1, |A|)` yields
         // `m = -1`; above the backend's ceiling the supporters that sign cannot
         // be aggregated into the approval evidence.
         parameter::REQUIRED_SUPPORT => {
             declared >= 1 && declared <= MAX_AGGREGATED_SIGNATURES as u64
         }
+        // ADR-015: the chain states how many signatures an approval-evidence
+        // block may carry; this build states how many it can aggregate and
+        // verify. A chain above the local ceiling produces evidence this node
+        // could never check.
+        parameter::MAX_AGGREGATED_SIGNATURES => {
+            declared >= 1 && declared <= MAX_AGGREGATED_SIGNATURES as u64
+        }
         // FR37: the denominator of the anti-capture rule.
         parameter::VOTE_SCALE => declared != 0,
-        // The compile-time block buffer width.
-        parameter::BLOCK_SIZE_LIMIT => declared <= MAX_BLOCK_SIZE as u64,
-        // The compile-time active-chain capacity.
-        parameter::ACTIVE_CHAIN_LENGTH => declared <= SNAKE_CHAIN_LENGTH_MAX as u64,
+        // The compile-time block buffer width above; the fixed header below,
+        // since a limit that cannot admit a header admits no block at all and
+        // every remaining-capacity computation against it underflows.
+        parameter::BLOCK_SIZE_LIMIT => {
+            declared > HEADER_SIZE as u64 && declared <= MAX_BLOCK_SIZE as u64
+        }
+        // A percentage.
+        parameter::BLOCK_FILL_THRESHOLD_PERCENT => declared <= 100,
+        // The compile-time active-chain capacity above; a window has to hold at
+        // least one block below.
+        parameter::ACTIVE_CHAIN_LENGTH => {
+            declared >= 1 && declared <= SNAKE_CHAIN_LENGTH_MAX as u64
+        }
+        // The budget every evaluation is bounded by, and which acceptance itself
+        // spends once per argument-less program. At zero every program silently
+        // resolves to its default with no diagnostic anywhere; unbounded above, a
+        // single content could hold the core for as long as it asked.
+        parameter::VM_FUEL_LIMIT => declared >= 1 && declared <= VM_FUEL_LIMIT_MAX as u64,
         _ => true,
     };
 

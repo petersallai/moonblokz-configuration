@@ -23,4 +23,4 @@ path = "src/main.rs"
 moonblokz-configuration = { path = "../..", default-features = false, features = ["schnorr-crypto-bigint"] }
 moonblokz-chain-types = { path = "../../../moonblokz-chain-types", default-features = false, features = ["schnorr-crypto-bigint"] }
 moonblokz-crypto = { path = "../../../moonblokz-crypto-lib", default-features = false, features = ["schnorr-crypto-bigint"] }
-moonblokz-vm-asm = { path = "../../../moonblokz-vm/tools/vm-asm" }
+moonblokz-vm-asm = { path = "../../../moonblokz-vm/tools/vm-asm", default-features = false }

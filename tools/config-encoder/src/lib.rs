@@ -235,11 +235,14 @@ fn parse(source: &str) -> Result<Vec<Override>, EncodeError> {
 
         let rest = rest.trim();
         let value = if rest == "{" {
-            // An assembly block runs to a line holding only `}`. The body is
-            // handed to the assembler verbatim once `@name` references are
-            // resolved, so `;` comments inside it stay the assembler's.
+            // An assembly block runs to a line whose *code* is `}` — a trailing
+            // `#` comment on the terminator still closes the block, and a `}`
+            // inside an assembler `;` comment does not. The body otherwise reaches
+            // the assembler verbatim, so its `;` comments stay the assembler's.
             let start = index;
-            while index < lines.len() && lines[index].trim() != "}" {
+            while index < lines.len()
+                && strip_asm_comment(strip_comment(lines[index])).trim() != "}"
+            {
                 index += 1;
             }
             if index == lines.len() {
@@ -285,7 +288,11 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
     for (index, raw) in body.iter().enumerate() {
         let line_no = offset + index + 1;
         let mut line = String::new();
-        let mut rest = *raw;
+        // Only the code half is scanned for `@`; the comment is appended
+        // untouched, so prose containing an `@` is not read as a reference.
+        let code = strip_asm_comment(raw);
+        let comment = &raw[code.len()..];
+        let mut rest = code;
 
         while let Some(at) = rest.find('@') {
             line.push_str(&rest[..at]);
@@ -300,6 +307,7 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
             rest = &after[end..];
         }
         line.push_str(rest);
+        line.push_str(comment);
 
         check_getparam_arity(line_no, &line)?;
         resolved.push_str(&line);
@@ -315,7 +323,12 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
 /// silently fall back to its default; catching it here is what turns that into a
 /// diagnostic naming the line.
 fn check_getparam_arity(line_no: usize, line: &str) -> Result<(), EncodeError> {
-    let code = line.split(';').next().unwrap_or("").trim();
+    // A label may precede an instruction on the same line (specification §7.2.4),
+    // so the mnemonic is not always the first token. Missing that would silently
+    // skip the check for a labelled `GETPARAM` — and the program would then fall
+    // back on-device with no diagnostic, which is exactly what this check exists
+    // to prevent.
+    let code = strip_label(line.split(';').next().unwrap_or("").trim());
     let mut tokens = code.split_whitespace();
     let Some(mnemonic) = tokens.next() else {
         return Ok(());
@@ -324,7 +337,7 @@ fn check_getparam_arity(line_no: usize, line: &str) -> Result<(), EncodeError> {
         return Ok(());
     }
 
-    let operands: Vec<&str> = code[mnemonic.len()..]
+    let operands: Vec<&str> = code[code.find(mnemonic).unwrap_or(0) + mnemonic.len()..]
         .split(',')
         .flat_map(|part| part.split_whitespace())
         .collect();
@@ -427,6 +440,26 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
+/// Drops a leading `label:` — the one place a mnemonic is not the first token.
+fn strip_label(code: &str) -> &str {
+    match code.find(':') {
+        Some(at) => code[at + 1..].trim_start(),
+        None => code,
+    }
+}
+
+/// Assembly source with its `;` comment removed.
+///
+/// The `@name` scan and the block terminator both have to look at code only: a
+/// `}` inside a comment must not close the block, and an `@` inside one must not
+/// be read as a parameter reference and fail with a diagnostic pointing at prose.
+fn strip_asm_comment(line: &str) -> &str {
+    match line.find(';') {
+        Some(at) => &line[..at],
+        None => line,
+    }
+}
+
 /// A message for each acceptance rejection. `ChainConfigError` carries no
 /// `Debug` outside the library's own tests — every trait impl costs binary size
 /// on embedded targets — so the diagnostic is written out here.
@@ -457,7 +490,8 @@ fn describe(error: &ChainConfigError) -> String {
 mod tests {
     use super::*;
     use moonblokz_configuration::{
-        ChainConfigTrait, ChainConfiguration, NoopConfigChangeSink, SNAKE_CHAIN_LENGTH_MAX,
+        ChainConfigTrait, ChainConfiguration, NoopConfigChangeSink, PARAMETER_COUNT,
+        SNAKE_CHAIN_LENGTH_MAX,
     };
     use moonblokz_crypto::SignatureTrait;
 
@@ -477,22 +511,30 @@ mod tests {
     fn names_match_the_registry() {
         // Every allocated identifier has exactly one name, and every name refers
         // to an allocated identifier. This is what lets the registry stay
-        // name-free without the two drifting.
+        // name-free without the two drifting — so the loop is driven by
+        // `PARAMETER_COUNT`, from the registry, not by the length of the table
+        // under test. Bounding it by `NAMES.len()` would let a newly allocated
+        // identifier ship unnamed with a green test, which is precisely the drift
+        // this exists to catch.
+        assert_eq!(
+            NAMES.len(),
+            PARAMETER_COUNT,
+            "the name table and the registry have diverged in size"
+        );
+
+        let mut seen = [false; PARAMETER_COUNT + 1];
         for (name, id) in NAMES {
             assert!(
                 parameter_spec(id).is_some(),
                 "`{name}` refers to unallocated identifier {id}"
             );
-        }
-        let mut seen = vec![false; NAMES.len() + 1];
-        for (name, id) in NAMES {
             assert!(!seen[id as usize], "identifier {id} named twice (`{name}`)");
             seen[id as usize] = true;
         }
-        for id in 1..=NAMES.len() as u8 {
+        for id in 1..=PARAMETER_COUNT as u8 {
             assert!(
-                parameter_spec(id).is_some() == seen[id as usize],
-                "identifier {id} is allocated but unnamed, or named but unallocated"
+                seen[id as usize],
+                "identifier {id} is allocated in the registry but has no name"
             );
         }
     }
@@ -619,13 +661,60 @@ mod tests {
         assert_eq!(error.line, 0);
         assert!(error.message.contains("structural bound"));
 
-        // And an argument-less program that cannot complete is rejected by being
-        // run, which is what stands in for a bytecode verifier.
-        let error = encode(
-            "vote_interest = {\n    GETPARAM @vote_scale, 0\n    RET\n}\n",
-            KEY,
+        // Reading another parameter is legitimate and must still encode.
+        assert!(
+            encode(
+                "vote_interest = {\n    GETPARAM @vote_scale, 0\n    RET\n}\n",
+                KEY,
+            )
+            .is_ok(),
+            "reading another parameter is legitimate"
         );
-        assert!(error.is_ok(), "reading another parameter is legitimate");
+
+        // And an argument-less program that cannot complete is rejected by being
+        // *run* — the acceptance-time evaluation that stands in for a bytecode
+        // verifier. `DIV` with an empty stack underflows, which the assembler
+        // cannot diagnose (operand-stack depth is not static) and only the
+        // evaluation catches.
+        let error = encode("vote_interest = {\n    DIV\n    RET\n}\n", KEY)
+            .expect_err("a program that traps must not encode");
+        assert_eq!(error.line, 0);
+        assert!(error.message.contains("did not complete"));
+    }
+
+    #[test]
+    fn a_labelled_getparam_is_still_arity_checked() {
+        // A label may precede an instruction on the same line, so the mnemonic is
+        // not always the first token.
+        let error = encode(
+            "vote_interest = {\n    top: GETPARAM @inter_block_interval_ms, 1\n    RET\n}\n",
+            KEY,
+        )
+        .expect_err("identifier 1 is argument-less");
+        assert_eq!(error.line, 2);
+        assert!(error.message.contains("arity 0"));
+    }
+
+    #[test]
+    fn a_comment_on_the_terminator_still_closes_the_block() {
+        let module = loaded("vote_interest = {\n    PUSH 4\n    RET\n} # done\nvote_scale = 250\n");
+        let config = module.active_configuration().expect("handle");
+        assert_eq!(config.vote_interest(), 4);
+        // The line after the terminator was parsed, not swallowed.
+        assert_eq!(config.vote_scale().get(), 250);
+    }
+
+    #[test]
+    fn an_at_sign_inside_an_assembler_comment_is_not_a_reference() {
+        let module =
+            loaded("vote_interest = {\n    PUSH 4   ; see @nothing, and a } too\n    RET\n}\n");
+        assert_eq!(
+            module
+                .active_configuration()
+                .expect("handle")
+                .vote_interest(),
+            4
+        );
     }
 
     #[test]
