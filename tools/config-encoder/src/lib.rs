@@ -604,7 +604,10 @@ mod tests {
 
     #[test]
     fn a_program_under_a_literal_only_parameter_is_refused() {
-        let error = encode("required_support = {\n    PUSH 3\n    RET\n}\n", KEY)
+        // `active_chain_length` is literal-only because its bound is measured
+        // against a compile-time capacity of the local build, so the decision has
+        // to be a rejection at acceptance rather than a fallback at resolution.
+        let error = encode("active_chain_length = {\n    PUSH 3\n    RET\n}\n", KEY)
             .expect_err("literal-only");
         assert_eq!(error.line, 1);
         assert!(error.message.contains("literal-only"));

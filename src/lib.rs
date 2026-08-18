@@ -300,7 +300,7 @@ const REGISTRY: [ParameterSpec; 29] = [
     spec_of(parameter::BLOCK_SIZE_LIMIT, 2, 0, false, 2016),
     spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 1, 0, false, 255),
     spec_of(parameter::MAX_AGGREGATED_SIGNATURES, 1, 0, false, 50),
-    spec_of(parameter::VOTE_SCALE, 2, 0, false, 1000),
+    spec_of(parameter::VOTE_SCALE, 2, 0, true, 1000),
     spec_of(parameter::VOTE_INTEREST, 1, 0, true, 5),
     spec_of(
         parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS,
@@ -316,7 +316,7 @@ const REGISTRY: [ParameterSpec; 29] = [
         true,
         10_000,
     ),
-    spec_of(parameter::REQUIRED_SUPPORT, 1, 0, false, 3),
+    spec_of(parameter::REQUIRED_SUPPORT, 1, 0, true, 3),
     spec_of(parameter::ECHO_REQUEST_MINIMAL_INTERVAL, 2, 0, true, 1440),
     spec_of(parameter::ECHO_MESSAGES_TARGET_INTERVAL, 1, 0, true, 100),
     spec_of(parameter::ECHO_GATHERING_TIMEOUT, 1, 0, true, 10),
@@ -923,8 +923,11 @@ impl<'a> ActiveConfig<'a> {
     /// Resolves `id` over `args` through the three tiers.
     ///
     /// Tier 1 is the chain-config override, tier 2 the code-baked default, tier 3
-    /// the code-baked fallback literal. **Each tier that needs a budget starts a
-    /// fresh one**: if a lower tier inherited an exhausted budget, then whenever
+    /// the code-baked fallback literal. A tier fails — and resolution moves to the
+    /// next — when its program traps, exhausts its budget, or **returns a value
+    /// outside the parameter's bound**; the last of those is what lets a bounded
+    /// parameter admit a program, since acceptance cannot check a computed value.
+    /// **Each tier that needs a budget starts a fresh one**: if a lower tier inherited an exhausted budget, then whenever
     /// exhaustion was the failure cause the tier below could never run, and it
     /// would be dead code. Sharing happens along the other axis — a nested
     /// `GETPARAM` draws from the budget of the invocation that started it, so a
@@ -950,6 +953,7 @@ impl<'a> ActiveConfig<'a> {
                 let mut tier_fuel = Fuel::new(self.fuel_limit());
                 if let VmOutcome::Completed(value) =
                     ConfigVm::execute(program, args, &mut tier_fuel, self)
+                    && let Some(value) = bounded(spec.id, value)
                 {
                     return value;
                 }
@@ -978,7 +982,12 @@ impl<'a> ActiveConfig<'a> {
                 return None;
             }
             match ConfigVm::execute(entry.value(), args, fuel, self) {
-                VmOutcome::Completed(value) => Some(value),
+                // A computed value has to clear the same bound a declared literal
+                // does. Acceptance cannot check it — it evaluates nothing — so the
+                // check happens here, and a violation is treated exactly like a
+                // trap: this tier failed, resolution moves on. That is what lets a
+                // bounded parameter admit a program at all.
+                VmOutcome::Completed(value) => bounded(spec.id, value),
                 // Both non-`Completed` outcomes map onto the next tier: nothing
                 // is observable to the accessor's caller, whose surface stays
                 // total.
@@ -1201,6 +1210,36 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
     }
 
     Ok(view.content().len())
+}
+
+/// A computed value, if it clears its parameter's bound.
+///
+/// The resolution counterpart of [`check_bound`], and deliberately the same
+/// predicate: "valid" is defined once, and a program is held to exactly the
+/// standard a declared literal is. Returning `None` makes an out-of-range result
+/// a *tier failure* rather than a value, so resolution falls through to the
+/// code-baked default and then to the fallback literal — which is what allows a
+/// parameter to carry a bound and still admit a program.
+///
+/// # A bound that is not universal must not reach this
+///
+/// At acceptance, a bound measured against a compile-time constant of *this build*
+/// is safe: a node that cannot honour the value rejects the chain and stops
+/// participating, so there is no divergence. Here it is different — a fallback
+/// keeps the node participating with a *different value*, so if two builds
+/// disagreed about the bound they would disagree about the value, with no error on
+/// either side. Every bound reachable from here must therefore hold identically on
+/// every build. That is why `UTXO_UNSPENT_BITS` (ID 4) and `SNAKE_CHAIN_LENGTH_MAX`
+/// (ID 21) belong to literal-only parameters: their limits are per-build, so the
+/// decision has to stay at acceptance, where the answer is rejection rather than
+/// substitution. ID 10's ceiling is `MAX_AGGREGATED_SIGNATURES`, which ADR-015
+/// calls backend-dependent and every current backend reports alike — see the
+/// tripwire test named for it.
+fn bounded(id: u8, value: u64) -> Option<u64> {
+    match check_bound(id, value) {
+        Ok(()) => Some(value),
+        Err(_) => None,
+    }
 }
 
 /// The structural bounds, applied to a declared value.

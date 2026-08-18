@@ -561,8 +561,6 @@ fn bytecode_under_a_literal_only_parameter_is_rejected() {
         parameter::BLOCK_SIZE_LIMIT,
         parameter::MAX_BLOCK_UTXO_OUTPUT,
         parameter::MAX_AGGREGATED_SIGNATURES,
-        parameter::VOTE_SCALE,
-        parameter::REQUIRED_SUPPORT,
         parameter::ACTIVE_CHAIN_LENGTH,
         parameter::SCORING_MATRIX,
         parameter::VM_FUEL_LIMIT,
@@ -917,13 +915,10 @@ fn the_transaction_fee_range_may_not_be_inverted() {
 }
 
 #[test]
-fn a_program_under_a_bounded_parameter_is_not_bound_checked() {
-    // The consequence of dropping acceptance-time evaluation, stated as a test so
-    // it is a decision rather than a surprise. It now applies to exactly one
-    // scalar bound: `block_fill_threshold_percent`, the last bounded parameter
-    // that still admits a program. Its failure mode is a rule the whole chain
-    // applies alike -- a threshold above 100 never triggers -- never a value this
-    // node cannot represent.
+fn a_program_returning_an_out_of_bound_value_falls_through_to_the_next_tier() {
+    // The bound is enforced at *resolution* for a computed value, because
+    // acceptance evaluates nothing. An out-of-range result is treated exactly like
+    // a trap: the tier failed, so the code-baked default stands.
     let over = push_u8_program(101);
     let payload = frame(&[Entry::Bytecode(
         parameter::BLOCK_FILL_THRESHOLD_PERCENT,
@@ -935,25 +930,101 @@ fn a_program_under_a_bounded_parameter_is_not_bound_checked() {
         parameter::BLOCK_FILL_THRESHOLD_PERCENT,
         &over,
     )]);
+    let config = module.active_configuration().expect("handle");
+    assert_eq!(config.block_fill_threshold_percent(), 80);
+    // Deterministic: the same content resolves the same way on every call.
+    assert_eq!(config.block_fill_threshold_percent(), 80);
+
+    // An in-range program is used, so the guard rejects values and not programs.
+    let within = push_u8_program(60);
+    let module = loaded(&[Entry::Bytecode(
+        parameter::BLOCK_FILL_THRESHOLD_PERCENT,
+        &within,
+    )]);
     assert_eq!(
         module
             .active_configuration()
             .expect("handle")
             .block_fill_threshold_percent(),
-        101
+        60
+    );
+}
+
+#[test]
+fn a_computed_vote_scale_may_not_be_zero() {
+    // Identifier 6 admits a program now, and the accessor's `NonZeroU16` return
+    // type is upheld by the guard rather than by the type's fallback arm: a
+    // program returning 0 fails its tier and the code-baked 1000 stands.
+    let zero = push_u8_program(0);
+    let payload = frame(&[Entry::Bytecode(parameter::VOTE_SCALE, &zero)]);
+    assert!(accept_content(payload.as_slice()).is_ok());
+
+    let module = loaded(&[Entry::Bytecode(parameter::VOTE_SCALE, &zero)]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .vote_scale()
+            .get(),
+        1000
     );
 
-    // The literal form of the same parameter is still checked.
-    let literal = frame(&[Entry::Literal(
-        parameter::BLOCK_FILL_THRESHOLD_PERCENT,
-        &[101],
-    )]);
-    assert!(matches!(
-        accept_content(literal.as_slice()),
-        Err(ChainConfigError::BoundViolation(
-            parameter::BLOCK_FILL_THRESHOLD_PERCENT
-        ))
-    ));
+    // A legal computed value is used.
+    let valid = push_u16_program(250);
+    let module = loaded(&[Entry::Bytecode(parameter::VOTE_SCALE, &valid)]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .vote_scale()
+            .get(),
+        250
+    );
+}
+
+#[test]
+fn a_computed_required_support_is_held_to_both_ends_of_its_bound() {
+    // Identifier 10 admits a program now. Below 1 the ADR-015 subgroup formula
+    // yields a negative size; above the backend ceiling the required signers
+    // cannot be aggregated. Either way the tier fails and the default stands.
+    for program in [
+        push_u8_program(0),
+        push_u8_program(MAX_AGGREGATED_SIGNATURES as u8 + 1),
+    ] {
+        let module = loaded(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &program)]);
+        assert_eq!(
+            module
+                .active_configuration()
+                .expect("handle")
+                .required_support(),
+            3
+        );
+    }
+
+    let valid = push_u8_program(5);
+    let module = loaded(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &valid)]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .required_support(),
+        5
+    );
+}
+
+#[test]
+fn the_aggregation_ceiling_is_uniform_across_backends() {
+    // A tripwire, not a property of this crate. `required_support`'s upper bound is
+    // now reachable from *resolution*, where a violation falls back rather than
+    // rejecting the chain — so two builds that disagreed about the ceiling would
+    // resolve the same content to different values, silently. That is safe only
+    // while every crypto backend reports the same ceiling. If this assertion ever
+    // fails, identifier 10 must go back to literal-only, or its upper bound must
+    // move out of the resolution guard and stay at acceptance.
+    assert_eq!(
+        MAX_AGGREGATED_SIGNATURES, 50,
+        "a backend changed the aggregation ceiling: see identifier 10's value form"
+    );
 }
 
 #[test]
