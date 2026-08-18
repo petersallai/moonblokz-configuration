@@ -143,7 +143,8 @@ pub mod parameter {
     pub const INTER_BLOCK_INTERVAL_MS: u8 = 1;
     /// FR47 grace-period window length, milliseconds.
     pub const GRACE_PERIOD_WINDOW_MS: u8 = 2;
-    /// Chain-config block-size limit, bounded by `MAX_BLOCK_SIZE`.
+    /// Block-size limit. Literal-only: its bound is what keeps the limit inside
+    /// the compile-time block buffer, and only a declared value is checkable.
     pub const BLOCK_SIZE_LIMIT: u8 = 3;
     /// Maximum UTXO outputs per block, bounded by `UTXO_UNSPENT_BITS`.
     pub const MAX_BLOCK_UTXO_OUTPUT: u8 = 4;
@@ -296,7 +297,7 @@ const fn spec_of_program(
 const REGISTRY: [ParameterSpec; 29] = [
     spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, 0, true, 60_000),
     spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, 0, true, 30_000),
-    spec_of(parameter::BLOCK_SIZE_LIMIT, 2, 0, true, 2016),
+    spec_of(parameter::BLOCK_SIZE_LIMIT, 2, 0, false, 2016),
     spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 1, 0, false, 255),
     spec_of(parameter::MAX_AGGREGATED_SIGNATURES, 1, 0, false, 50),
     spec_of(parameter::VOTE_SCALE, 2, 0, false, 1000),

@@ -558,6 +558,7 @@ fn a_width_mismatched_literal_is_rejected() {
 fn bytecode_under_a_literal_only_parameter_is_rejected() {
     let program = push_u8_program(4);
     for id in [
+        parameter::BLOCK_SIZE_LIMIT,
         parameter::MAX_BLOCK_UTXO_OUTPUT,
         parameter::MAX_AGGREGATED_SIGNATURES,
         parameter::VOTE_SCALE,
@@ -918,33 +919,39 @@ fn the_transaction_fee_range_may_not_be_inverted() {
 #[test]
 fn a_program_under_a_bounded_parameter_is_not_bound_checked() {
     // The consequence of dropping acceptance-time evaluation, stated as a test so
-    // it is a decision rather than a surprise: a program may drive a bounded
-    // parameter out of range. It is confined to the two bounded parameters that
-    // admit a program at all, and to a *weaker rule* the whole chain applies
-    // alike -- never to a value this node cannot represent, because every
-    // representation-critical bound sits on a literal-only parameter.
-    let over = push_u16_program(MAX_BLOCK_SIZE as u16 + 1);
-    let payload = frame(&[Entry::Bytecode(parameter::BLOCK_SIZE_LIMIT, &over)]);
+    // it is a decision rather than a surprise. It now applies to exactly one
+    // scalar bound: `block_fill_threshold_percent`, the last bounded parameter
+    // that still admits a program. Its failure mode is a rule the whole chain
+    // applies alike -- a threshold above 100 never triggers -- never a value this
+    // node cannot represent.
+    let over = push_u8_program(101);
+    let payload = frame(&[Entry::Bytecode(
+        parameter::BLOCK_FILL_THRESHOLD_PERCENT,
+        &over,
+    )]);
     assert!(accept_content(payload.as_slice()).is_ok());
 
-    let module = loaded(&[Entry::Bytecode(parameter::BLOCK_SIZE_LIMIT, &over)]);
+    let module = loaded(&[Entry::Bytecode(
+        parameter::BLOCK_FILL_THRESHOLD_PERCENT,
+        &over,
+    )]);
     assert_eq!(
         module
             .active_configuration()
             .expect("handle")
-            .block_size_limit(),
-        MAX_BLOCK_SIZE as u16 + 1
+            .block_fill_threshold_percent(),
+        101
     );
 
     // The literal form of the same parameter is still checked.
     let literal = frame(&[Entry::Literal(
-        parameter::BLOCK_SIZE_LIMIT,
-        &(MAX_BLOCK_SIZE as u16 + 1).to_le_bytes(),
+        parameter::BLOCK_FILL_THRESHOLD_PERCENT,
+        &[101],
     )]);
     assert!(matches!(
         accept_content(literal.as_slice()),
         Err(ChainConfigError::BoundViolation(
-            parameter::BLOCK_SIZE_LIMIT
+            parameter::BLOCK_FILL_THRESHOLD_PERCENT
         ))
     ));
 }
