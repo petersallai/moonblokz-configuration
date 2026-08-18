@@ -199,7 +199,7 @@ fn no_configuration_yields_no_handle() {
 fn literal_override_wins_over_the_default() {
     let module = loaded(&[Entry::Literal(
         parameter::INTER_BLOCK_INTERVAL_MS,
-        &45_000u64.to_le_bytes(),
+        &45_000u32.to_le_bytes(),
     )]);
     let config = module.active_configuration().expect("handle");
 
@@ -231,7 +231,7 @@ fn bytecode_reads_another_parameter_of_the_same_content() {
         op::RET,
     ];
     let module = loaded(&[
-        Entry::Literal(parameter::INTER_BLOCK_INTERVAL_MS, &90_000u64.to_le_bytes()),
+        Entry::Literal(parameter::INTER_BLOCK_INTERVAL_MS, &90_000u32.to_le_bytes()),
         Entry::Bytecode(parameter::GRACE_PERIOD_WINDOW_MS, &program),
     ]);
     let config = module.active_configuration().expect("handle");
@@ -485,11 +485,67 @@ fn an_unallocated_identifier_is_rejected_with_its_key_byte() {
 }
 
 #[test]
+fn every_duration_is_four_bytes_wide() {
+    // The declared widths are permanent wire format, so the rule is pinned by a
+    // test rather than only by the table: every millisecond duration takes a
+    // `u32`, and the eight-byte form they used to take is now malformed.
+    for id in [
+        parameter::INTER_BLOCK_INTERVAL_MS,
+        parameter::GRACE_PERIOD_WINDOW_MS,
+        parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS,
+        parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS,
+        parameter::MEMPOOL_REPLENISHMENT_INTERVAL_MS,
+        parameter::DEVIATION_REPLAY_INSERTION_DELAY_MS,
+    ] {
+        let four = frame(&[Entry::Literal(id, &900_000u32.to_le_bytes())]);
+        assert!(
+            accept_content(four.as_slice()).is_ok(),
+            "identifier {id} should accept a four-byte literal"
+        );
+
+        let eight = frame(&[Entry::Literal(id, &900_000u64.to_le_bytes())]);
+        assert!(
+            matches!(
+                accept_content(eight.as_slice()),
+                Err(ChainConfigError::ValueWidthMismatch(rejected)) if rejected == id
+            ),
+            "identifier {id} should refuse an eight-byte literal"
+        );
+    }
+
+    // The value-typed parameters are untouched: only durations narrowed.
+    let module = loaded(&[Entry::Literal(
+        parameter::MEMPOOL_REPLENISHMENT_INTERVAL_MS,
+        &900_000u32.to_le_bytes(),
+    )]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .mempool_replenishment_interval_ms(),
+        900_000
+    );
+}
+
+#[test]
 fn a_width_mismatched_literal_is_rejected() {
-    // Four bytes under an eight-byte parameter.
+    // Four bytes under an eight-byte parameter: `custodian_fee` is a value, not a
+    // duration, so it stays `u64`.
+    let payload = frame(&[Entry::Literal(
+        parameter::CUSTODIAN_FEE,
+        &1u32.to_le_bytes(),
+    )]);
+    let error = accept_content(payload.as_slice()).expect_err("width must match exactly");
+    assert!(matches!(
+        error,
+        ChainConfigError::ValueWidthMismatch(parameter::CUSTODIAN_FEE)
+    ));
+
+    // And eight bytes under a four-byte one: every duration is `u32`
+    // milliseconds, so the wide form its accessor used to take is malformed.
     let payload = frame(&[Entry::Literal(
         parameter::INTER_BLOCK_INTERVAL_MS,
-        &1u32.to_le_bytes(),
+        &1u64.to_le_bytes(),
     )]);
     let error = accept_content(payload.as_slice()).expect_err("width must match exactly");
     assert!(matches!(

@@ -124,6 +124,12 @@ type ConfigVm = Vm<VM_STACK_DEPTH, VM_LOCAL_SLOTS, VM_MAX_NESTING>;
 /// radio and the VM alike — so that a single authority allocates identifiers and
 /// two subsystems cannot pick the same one.
 ///
+/// **Every duration is milliseconds in a `u32`.** That carries 49 days, against
+/// defaults measured in seconds and minutes, so the width costs nothing and saves
+/// four bytes on the wire per override. Callers that mix a duration into
+/// timestamp arithmetic widen it at the use site, which is where the widening is
+/// visible rather than assumed.
+///
 /// **The defaults are permanent too**, for a less obvious reason than the
 /// identifiers: a chain that omits a parameter validates against this build's
 /// default for it, so two firmware versions whose default tables differ by one
@@ -288,8 +294,8 @@ const fn spec_of_program(
 /// The registry, in identifier order. See [`parameter`] for the identifiers and
 /// the wire-format rules that govern them.
 const REGISTRY: [ParameterSpec; 29] = [
-    spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 8, 0, true, 60_000),
-    spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 8, 0, true, 30_000),
+    spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, 0, true, 60_000),
+    spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, 0, true, 30_000),
     spec_of(parameter::BLOCK_SIZE_LIMIT, 2, 0, true, 2016),
     spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 1, 0, false, 255),
     spec_of(parameter::MAX_AGGREGATED_SIGNATURES, 1, 0, false, 50),
@@ -297,14 +303,14 @@ const REGISTRY: [ParameterSpec; 29] = [
     spec_of(parameter::VOTE_INTEREST, 1, 0, true, 5),
     spec_of(
         parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS,
-        8,
+        4,
         0,
         true,
         120_000,
     ),
     spec_of(
         parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS,
-        8,
+        4,
         0,
         true,
         10_000,
@@ -339,7 +345,7 @@ const REGISTRY: [ParameterSpec; 29] = [
     spec_of(parameter::ACTIVE_CHAIN_LENGTH, 2, 0, false, 500),
     spec_of(
         parameter::MEMPOOL_REPLENISHMENT_INTERVAL_MS,
-        8,
+        4,
         0,
         true,
         500_000,
@@ -350,7 +356,7 @@ const REGISTRY: [ParameterSpec; 29] = [
     spec_of(parameter::TX_FEE_PER_BYTE_MAX, 8, 0, true, 1000),
     spec_of(
         parameter::DEVIATION_REPLAY_INSERTION_DELAY_MS,
-        8,
+        4,
         0,
         true,
         300_000,
@@ -738,13 +744,13 @@ impl<'a> ActiveConfig<'a> {
     // -- Blockchain parameters --
 
     /// FR45 (b) inter-block creation wait, milliseconds.
-    pub fn inter_block_interval_ms(&self) -> u64 {
-        self.resolve(parameter::INTER_BLOCK_INTERVAL_MS, &[])
+    pub fn inter_block_interval_ms(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::INTER_BLOCK_INTERVAL_MS, &[]))
     }
 
     /// FR47 grace-period window length, milliseconds.
-    pub fn grace_period_window_ms(&self) -> u64 {
-        self.resolve(parameter::GRACE_PERIOD_WINDOW_MS, &[])
+    pub fn grace_period_window_ms(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::GRACE_PERIOD_WINDOW_MS, &[]))
     }
 
     /// Chain-config block-size limit, at most `MAX_BLOCK_SIZE`.
@@ -783,13 +789,13 @@ impl<'a> ActiveConfig<'a> {
     }
 
     /// FR19 / FR46 per-head parent-recovery retry window, milliseconds.
-    pub fn parent_recovery_per_head_retry_interval_ms(&self) -> u64 {
-        self.resolve(parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS, &[])
+    pub fn parent_recovery_per_head_retry_interval_ms(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS, &[]))
     }
 
     /// FR46 module-scope parent-recovery emit cooldown, milliseconds.
-    pub fn parent_recovery_min_emit_interval_ms(&self) -> u64 {
-        self.resolve(parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS, &[])
+    pub fn parent_recovery_min_emit_interval_ms(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS, &[]))
     }
 
     /// ADR-015 required support count.
@@ -808,8 +814,11 @@ impl<'a> ActiveConfig<'a> {
     }
 
     /// FR56 mempool replenishment interval, milliseconds.
-    pub fn mempool_replenishment_interval_ms(&self) -> u64 {
-        self.resolve(parameter::MEMPOOL_REPLENISHMENT_INTERVAL_MS, &[])
+    ///
+    /// `u32` is ample: it carries 49 days of milliseconds against a default of
+    /// eight and a half minutes.
+    pub fn mempool_replenishment_interval_ms(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::MEMPOOL_REPLENISHMENT_INTERVAL_MS, &[]))
     }
 
     /// FR51 carry-forward custodian fee.
@@ -837,8 +846,8 @@ impl<'a> ActiveConfig<'a> {
     }
 
     /// FR29 deviation-replay insertion delay, milliseconds.
-    pub fn deviation_replay_insertion_delay_ms(&self) -> u64 {
-        self.resolve(parameter::DEVIATION_REPLAY_INSERTION_DELAY_MS, &[])
+    pub fn deviation_replay_insertion_delay_ms(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::DEVIATION_REPLAY_INSERTION_DELAY_MS, &[]))
     }
 
     /// FR36 (c) replay-block reward.
