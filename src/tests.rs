@@ -772,6 +772,13 @@ fn block_fill_threshold_is_a_percentage() {
 
 #[test]
 fn the_fuel_limit_is_bounded_at_both_ends() {
+    // The ceiling *is* the default, which makes the budget a downward-only knob: a
+    // chain can buy itself shorter evaluations, never longer ones.
+    assert_eq!(
+        u64::from(VM_FUEL_LIMIT_MAX),
+        spec(parameter::VM_FUEL_LIMIT).fallback
+    );
+
     let at_bound = frame(&[Entry::Literal(
         parameter::VM_FUEL_LIMIT,
         &VM_FUEL_LIMIT_MAX.to_le_bytes(),

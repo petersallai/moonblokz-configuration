@@ -74,19 +74,23 @@ pub const SNAKE_CHAIN_LENGTH_MAX: u16 = 500;
 /// Length of the radio scoring matrix, the one array-typed parameter.
 pub const SCORING_MATRIX_LEN: usize = 5;
 
-/// Ceiling on the chain-declared `vm_fuel_limit`.
+/// Ceiling on the chain-declared `vm_fuel_limit`, **equal to the code-baked
+/// default**.
 ///
 /// The limit bounds how long one program evaluation may hold the core, and
 /// acceptance pays that bound once per argument-less program — up to the 126
 /// entries the key space allows — so an unbounded limit would let one content
 /// hold the core for as long as it asked, against a watchdog.
 ///
-/// **Provisional at five times the code-baked default**, and recorded as such:
-/// specification §12 grounds the default at roughly 9 ms on a static 55–70
-/// cycles-per-instruction estimate whose timing half is not yet confirmed on
-/// hardware, so this value inherits that uncertainty and is expected to be
-/// re-based on measurement rather than argument.
-pub const VM_FUEL_LIMIT_MAX: u32 = 100_000;
+/// Setting the ceiling *at* the default makes the budget a **downward-only** knob:
+/// a chain may buy itself shorter evaluations, never longer ones. That is the only
+/// direction that needs no new number — the default is the one value §12 grounds,
+/// at roughly 9 ms on a static 55–70 cycles-per-instruction estimate — so raising
+/// the ceiling above it would be inventing a bound no measurement supports. A
+/// chain wanting more expensive computed parameters needs the default itself
+/// re-based on hardware measurement, which is a firmware change and a
+/// consensus-breaking one.
+pub const VM_FUEL_LIMIT_MAX: u32 = 20_000;
 
 // ---------------------------------------------------------------------------
 // The machine
@@ -400,6 +404,15 @@ const _: () = {
         assert!(REGISTRY[BOUNDED_IDS[index] as usize - 1].args == 0);
         index += 1;
     }
+};
+
+// The ceiling equals the default, so the two cannot be edited apart: a default
+// above its own ceiling would make the code-baked value itself unacceptable, and
+// nothing else in the crate would notice. The match also pins §4.3's rule that the
+// execution budget is a literal — resolving it must not require running a program.
+const _: () = match &REGISTRY[parameter::VM_FUEL_LIMIT as usize - 1].default {
+    DefaultValue::Literal(value) => assert!(*value <= VM_FUEL_LIMIT_MAX as u64),
+    DefaultValue::Program(_) => panic!("the execution budget must be a literal"),
 };
 
 // The retained payload's length fields are `u16`. Truncating them would leave the
