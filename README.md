@@ -46,6 +46,17 @@ module.promote_durable()?;                               // set-once, FR8
 - **Transport.** No `embassy-sync`, no snapshot publication.
 - **The commitment lifecycle.** *When* to load tentatively, compare, promote or discard is the blockchain's decision; this crate holds the state those decisions move through.
 
+## Adding a parameter
+
+The registry is permanent wire format, so an addition is examined against a checklist rather than reviewed on taste. It lives in **specification §4.5**; in short:
+
+1. The identifier, the declared width and the default are **all permanent** — a chain that omits a parameter validates against this build's default, so a default may never be derived from a build constant.
+2. **The bound decides the value form.** A *universal* limit (0, 1, 100, a wire-format constant) is enforced at acceptance on a declared literal and at resolution on a computed one, so the parameter may be `L/B`. A limit that is a *compile-time constant of this build* is enforced at acceptance only and the parameter must be `L` — refusing a chain cannot diverge, but a resolution-time fallback would leave this node participating with a different value than a differently-built node. If such a parameter must stay computable, have the **chain** declare the ceiling as a separate `L` parameter and clamp to it, the way `required_support` clamps to `max_aggregated_signatures`.
+3. **A bounded parameter takes no arguments** — no acceptance-time check covers every argument value.
+4. **A relation between two parameters is not this module's to enforce.** Acceptance may check it on declared literals as a founder-facing diagnostic, but the consumer resolves an inconsistent pair at the point of use, deterministically; the module must not clamp one to the other, because choosing which value wins is the consumer's decision.
+
+Four of these are compile-time assertions, so the build catches a table edit that breaks them.
+
 ## Tooling
 
 `tools/config-encoder` is a separate `std` package — separation at the package level rather than by feature flag, because Cargo unifies features per package and a `std` tool sharing this one could pull `std` into the library's own build. It turns parameter overrides (literal values, and assembly source where a parameter may be referenced as `@name`) into signed configuration content, applying the same framing and acceptance checks the runtime does — no more and no less, so what the tool accepts is what the network accepts.

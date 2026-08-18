@@ -137,7 +137,13 @@ type ConfigVm = Vm<VM_STACK_DEPTH, VM_LOCAL_SLOTS, VM_MAX_NESTING>;
 /// is the same silent split the unknown-key rule exists to prevent. Changing a
 /// value in the table below is a consensus-breaking change, not a tuning decision.
 ///
-/// **Next free identifier: 30.**
+/// **Next free identifier: 30.** Allocating one is governed by specification §4.5,
+/// which is a checklist rather than advice: the identifier, the width and the
+/// default are all permanent, the *bound* decides the value form (and a bound
+/// measured against a constant of this build forces literal-only), a bounded
+/// parameter takes no arguments, and a relation between two parameters is the
+/// consumer's to resolve rather than this module's. Four of those are asserted at
+/// compile time below.
 pub mod parameter {
     /// FR45 (b) inter-block creation wait, milliseconds.
     pub const INTER_BLOCK_INTERVAL_MS: u8 = 1;
