@@ -158,7 +158,9 @@ pub mod parameter {
     pub const PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS: u8 = 8;
     /// FR46 module-scope parent-recovery emit cooldown, milliseconds.
     pub const PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS: u8 = 9;
-    /// FR8 / ADR-015 required support count; `m = min(2·this − 1, |A|)`.
+    /// FR8 / ADR-015 required support count; `m = min(2·this − 1, |A|)`. May be
+    /// computed: its floor is universal and its ceiling is the chain's own
+    /// [`MAX_AGGREGATED_SIGNATURES`], applied as a clamp.
     pub const REQUIRED_SUPPORT: u8 = 10;
 
     /// Radio: minimum interval between echo requests, minutes.
@@ -409,6 +411,30 @@ const _: () = {
     let mut index = 0;
     while index < BOUNDED_IDS.len() {
         assert!(REGISTRY[BOUNDED_IDS[index] as usize - 1].args == 0);
+        index += 1;
+    }
+};
+
+/// The identifiers whose bound is measured against a compile-time constant of the
+/// **local build** rather than against a universal one.
+///
+/// These must stay literal-only, and the assertion below is what enforces it. The
+/// reason is not taste: a bound like this is safe at acceptance, where a node that
+/// cannot honour the declared value rejects the chain and stops participating — but
+/// unsafe as a resolution-time fallback, which would keep the node participating
+/// with a *different value* than a differently-built node resolves, with no error
+/// on either side. Admitting a program here would put the bound on the resolution
+/// path, so the form is the enforcement.
+const PER_BUILD_LIMITED_IDS: [u8; 3] = [
+    parameter::MAX_BLOCK_UTXO_OUTPUT,
+    parameter::MAX_AGGREGATED_SIGNATURES,
+    parameter::ACTIVE_CHAIN_LENGTH,
+];
+
+const _: () = {
+    let mut index = 0;
+    while index < PER_BUILD_LIMITED_IDS.len() {
+        assert!(!REGISTRY[PER_BUILD_LIMITED_IDS[index] as usize - 1].bytecode_allowed);
         index += 1;
     }
 };
@@ -799,9 +825,25 @@ impl<'a> ActiveConfig<'a> {
         narrow_u32(self.resolve(parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS, &[]))
     }
 
-    /// ADR-015 required support count.
+    /// ADR-015 required support count, **clamped to the chain's own
+    /// `max_aggregated_signatures`**.
+    ///
+    /// The clamp is what lets this parameter be computed. Its floor (`>= 1`) is
+    /// universal, so the resolution guard can enforce it on a computed value; its
+    /// ceiling is not — only the *chain* may state it, because a ceiling taken from
+    /// a build constant would make the clamp decision differ between builds. So the
+    /// chain declares the ceiling as a literal (identifier 5, bound-checked against
+    /// the backend at acceptance, where the answer to a value this build cannot
+    /// honour is rejection rather than substitution), and the clamp reads it back
+    /// from the same content every node holds.
+    ///
+    /// Clamping rather than falling back is deliberate, and matches ADR-015's own
+    /// `m = min(2·required_support − 1, |A|)`: it keeps a computed value's intent —
+    /// grow with the network, never exceed what the evidence can carry — where a
+    /// fallback would discard the computation for the code-baked default.
     pub fn required_support(&self) -> u8 {
         narrow_u8(self.resolve(parameter::REQUIRED_SUPPORT, &[]))
+            .min(self.max_aggregated_signatures())
     }
 
     /// FR45 (a) block fill threshold, percent.
@@ -1232,9 +1274,10 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
 /// every build. That is why `UTXO_UNSPENT_BITS` (ID 4) and `SNAKE_CHAIN_LENGTH_MAX`
 /// (ID 21) belong to literal-only parameters: their limits are per-build, so the
 /// decision has to stay at acceptance, where the answer is rejection rather than
-/// substitution. ID 10's ceiling is `MAX_AGGREGATED_SIGNATURES`, which ADR-015
-/// calls backend-dependent and every current backend reports alike — see the
-/// tripwire test named for it.
+/// substitution. Every bound this function can reach is universal — 0, 1, 100, and
+/// the block format's own `HEADER_SIZE` and `MAX_BLOCK_SIZE`. ID 10's ceiling was
+/// the one exception and is no longer here: it became a clamp against the chain's
+/// own declared value instead (see [`ActiveConfig::required_support`]).
 fn bounded(id: u8, value: u64) -> Option<u64> {
     match check_bound(id, value) {
         Ok(()) => Some(value),
@@ -1255,15 +1298,20 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
         // it is the pin that catches a build with a narrower cache.
         parameter::MAX_BLOCK_UTXO_OUTPUT => declared >= 1 && declared <= UTXO_UNSPENT_BITS as u64,
         // FR8 / ADR-015: below 1, `m = min(2·required_support − 1, |A|)` yields
-        // `m = -1`; above the backend's ceiling the supporters that sign cannot
-        // be aggregated into the approval evidence.
-        parameter::REQUIRED_SUPPORT => {
-            declared >= 1 && declared <= MAX_AGGREGATED_SIGNATURES as u64
-        }
+        // `m = -1`. Only the floor lives here, and deliberately so: it is universal,
+        // so the resolution guard may enforce it on a computed value. The ceiling is
+        // the chain's own `max_aggregated_signatures`, applied as a clamp by the
+        // accessor — see [`ActiveConfig::required_support`].
+        parameter::REQUIRED_SUPPORT => declared >= 1,
         // ADR-015: the chain states how many signatures an approval-evidence
         // block may carry; this build states how many it can aggregate and
         // verify. A chain above the local ceiling produces evidence this node
         // could never check.
+        //
+        // The only per-build limit left in this function, and reachable only from
+        // acceptance because the parameter is literal-only (`PER_BUILD_LIMITED_IDS`
+        // asserts that). It is also the ceiling `required_support` clamps to, which
+        // is why the clamp is chain-determined rather than build-determined.
         parameter::MAX_AGGREGATED_SIGNATURES => {
             declared >= 1 && declared <= MAX_AGGREGATED_SIGNATURES as u64
         }

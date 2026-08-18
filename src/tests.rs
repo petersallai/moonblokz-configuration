@@ -616,32 +616,76 @@ fn a_payload_over_the_retention_buffer_is_refused() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn required_support_is_bounded_at_both_ends() {
-    let accepted = frame(&[Entry::Literal(
-        parameter::REQUIRED_SUPPORT,
-        &[MAX_AGGREGATED_SIGNATURES as u8],
-    )]);
-    assert!(accept_content(accepted.as_slice()).is_ok());
-
-    let over = frame(&[Entry::Literal(
-        parameter::REQUIRED_SUPPORT,
-        &[MAX_AGGREGATED_SIGNATURES as u8 + 1],
-    )]);
-    assert!(matches!(
-        accept_content(over.as_slice()),
-        Err(ChainConfigError::BoundViolation(
-            parameter::REQUIRED_SUPPORT
-        ))
-    ));
-
-    let at_one = frame(&[Entry::Literal(parameter::REQUIRED_SUPPORT, &[1])]);
-    assert!(accept_content(at_one.as_slice()).is_ok());
-
+fn required_support_is_floored_at_acceptance_and_clamped_at_resolution() {
+    // The floor is universal, so acceptance checks it and the resolution guard can
+    // enforce it on a computed value too.
     let zero = frame(&[Entry::Literal(parameter::REQUIRED_SUPPORT, &[0])]);
     assert!(matches!(
         accept_content(zero.as_slice()),
         Err(ChainConfigError::BoundViolation(
             parameter::REQUIRED_SUPPORT
+        ))
+    ));
+    let at_one = frame(&[Entry::Literal(parameter::REQUIRED_SUPPORT, &[1])]);
+    assert!(accept_content(at_one.as_slice()).is_ok());
+
+    // The ceiling is *not* checked at acceptance any more: it is the chain's own
+    // `max_aggregated_signatures`, applied as a clamp, so a value above it is
+    // legal content that resolves to the ceiling.
+    let over = frame(&[Entry::Literal(
+        parameter::REQUIRED_SUPPORT,
+        &[MAX_AGGREGATED_SIGNATURES as u8 + 1],
+    )]);
+    assert!(accept_content(over.as_slice()).is_ok());
+    let module = loaded(&[Entry::Literal(
+        parameter::REQUIRED_SUPPORT,
+        &[MAX_AGGREGATED_SIGNATURES as u8 + 1],
+    )]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .required_support(),
+        MAX_AGGREGATED_SIGNATURES as u8
+    );
+}
+
+#[test]
+fn the_required_support_clamp_reads_the_chains_own_ceiling() {
+    // The clamp limit comes from the content, not from a build constant -- which is
+    // the whole point of the split. A chain that lowers its evidence ceiling lowers
+    // the effective support with it, identically on every node.
+    let module = loaded(&[
+        Entry::Literal(parameter::MAX_AGGREGATED_SIGNATURES, &[10]),
+        Entry::Literal(parameter::REQUIRED_SUPPORT, &[40]),
+    ]);
+    let config = module.active_configuration().expect("handle");
+    assert_eq!(config.max_aggregated_signatures(), 10);
+    assert_eq!(config.required_support(), 10);
+
+    // Below the ceiling the declared value stands.
+    let module = loaded(&[
+        Entry::Literal(parameter::MAX_AGGREGATED_SIGNATURES, &[10]),
+        Entry::Literal(parameter::REQUIRED_SUPPORT, &[4]),
+    ]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .required_support(),
+        4
+    );
+
+    // The ceiling itself is still literal-only and still bound-checked against the
+    // backend at acceptance, where the answer is rejection rather than a clamp.
+    let over = frame(&[Entry::Literal(
+        parameter::MAX_AGGREGATED_SIGNATURES,
+        &[MAX_AGGREGATED_SIGNATURES as u8 + 1],
+    )]);
+    assert!(matches!(
+        accept_content(over.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::MAX_AGGREGATED_SIGNATURES
         ))
     ));
 }
@@ -983,24 +1027,33 @@ fn a_computed_vote_scale_may_not_be_zero() {
 }
 
 #[test]
-fn a_computed_required_support_is_held_to_both_ends_of_its_bound() {
-    // Identifier 10 admits a program now. Below 1 the ADR-015 subgroup formula
-    // yields a negative size; above the backend ceiling the required signers
-    // cannot be aggregated. Either way the tier fails and the default stands.
-    for program in [
-        push_u8_program(0),
-        push_u8_program(MAX_AGGREGATED_SIGNATURES as u8 + 1),
-    ] {
-        let module = loaded(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &program)]);
-        assert_eq!(
-            module
-                .active_configuration()
-                .expect("handle")
-                .required_support(),
-            3
-        );
-    }
+fn a_computed_required_support_is_floored_by_fallback_and_capped_by_clamp() {
+    // Identifier 10 admits a program, and the two ends of its range are enforced by
+    // two different mechanisms -- which is the point of the split. Below 1 the
+    // universal floor fails the tier, so the code-baked 3 stands.
+    let below = push_u8_program(0);
+    let module = loaded(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &below)]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .required_support(),
+        3
+    );
 
+    // Above the chain's ceiling the clamp applies, keeping the computation's intent
+    // rather than discarding it for the default.
+    let above = push_u8_program(MAX_AGGREGATED_SIGNATURES as u8 + 1);
+    let module = loaded(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &above)]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .required_support(),
+        MAX_AGGREGATED_SIGNATURES as u8
+    );
+
+    // And a computed value inside the range is used as computed.
     let valid = push_u8_program(5);
     let module = loaded(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &valid)]);
     assert_eq!(
