@@ -475,9 +475,6 @@ fn describe(error: &ChainConfigError) -> String {
         ChainConfigError::BytecodeNotPermitted(id) => {
             format!("identifier {id} is literal-only and does not accept a program")
         }
-        ChainConfigError::BytecodeEvaluationFailed(id) => format!(
-            "the argument-less program for identifier {id} did not complete under the fuel limit"
-        ),
         ChainConfigError::BoundViolation(id) => format!(
             "the declared value for identifier {id} is outside the structural bound this build can honour"
         ),
@@ -671,15 +668,13 @@ mod tests {
             "reading another parameter is legitimate"
         );
 
-        // And an argument-less program that cannot complete is rejected by being
-        // *run* — the acceptance-time evaluation that stands in for a bytecode
-        // verifier. `DIV` with an empty stack underflows, which the assembler
-        // cannot diagnose (operand-stack depth is not static) and only the
-        // evaluation catches.
-        let error = encode("vote_interest = {\n    DIV\n    RET\n}\n", KEY)
-            .expect_err("a program that traps must not encode");
-        assert_eq!(error.line, 0);
-        assert!(error.message.contains("did not complete"));
+        // A program that traps is *not* rejected here: acceptance runs no
+        // programs, so the tool cannot promise more than the network checks. It
+        // falls back at resolution time instead, on every node alike.
+        assert!(
+            encode("vote_interest = {\n    DIV\n    RET\n}\n", KEY).is_ok(),
+            "the tool applies the network's checks, and the network runs no program at acceptance"
+        );
     }
 
     #[test]

@@ -475,11 +475,6 @@ pub enum ChainConfigError {
     ValueWidthMismatch(u8),
     /// A bytecode value appears under a literal-only parameter.
     BytecodeNotPermitted(u8),
-    /// An argument-less bytecode override did not complete at acceptance —
-    /// fuel exhaustion or a trap. A configuration that cannot be evaluated at
-    /// commit time is a defective configuration, not a runtime condition, so it
-    /// is refused rather than allowed to fall back.
-    BytecodeEvaluationFailed(u8),
     /// A declared value violates one of the structural bounds.
     BoundViolation(u8),
     /// A load or promotion was attempted while the configuration is durably
@@ -1098,11 +1093,17 @@ fn narrow_u32(value: u64) -> u32 {
 ///    content end, duplicate identifiers, key-byte range.
 /// 2. **Registry conformance**: identifier allocated, literal width exact,
 ///    bytecode only where the registry permits it.
-/// 3. **Declared values**: every argument-less bytecode override is evaluated
-///    once, under the content's own fuel limit, and every bound-carrying
-///    parameter's declared value is checked. An argument-less program's result
-///    cannot vary, so checking it once is sound — and running the real decoder
-///    on the real program is what stands in for a bytecode verifier.
+/// 3. **Declared literals**: the structural bounds, on the values the content
+///    states outright, plus the one invariant that spans two parameters.
+///
+/// **No program is run here.** Checking a program's result ahead of time is only
+/// possible when it takes no arguments, so such a pass is partial by construction
+/// and grows more partial with every argument-taking parameter the registry gains.
+/// A misbehaving program is already covered completely by the resolution model: a
+/// trap or an exhausted budget fails that tier and the value falls through to the
+/// code-baked default and then to the fallback literal, identically on every node
+/// (§7.3). The bounds that must hold for a node to *represent* the chain all sit on
+/// literal-only parameters and are therefore still checked below.
 pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
     // The retention buffer is fixed, so content this node could not hold is not
     // content it can accept. Checked here rather than at the load site so that the
@@ -1114,9 +1115,7 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
     let view = ChainConfigBlockPayloadView::from_payload(payload)
         .ok_or(ChainConfigError::MalformedContent)?;
 
-    // Pass 1 — registry conformance. Runs to completion before anything is
-    // evaluated, so a program never runs against entries that have not been
-    // checked.
+    // Pass 1 — registry conformance, every entry.
     for entry in view.iter() {
         let id = entry.parameter_id();
         let Some(spec) = parameter_spec(id) else {
@@ -1133,43 +1132,38 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
         }
     }
 
-    // Pass 2 — the execution budget, before it is spent. `vm_fuel_limit` bounds
-    // every evaluation below, and acceptance pays that bound once per
-    // argument-less program, so a declared limit is checked *before* it is used:
-    // validating it afterwards would mean a runaway program had already held the
-    // core for as long as the unchecked value asked.
-    check_bound(parameter::VM_FUEL_LIMIT, declared_fuel_limit(&view))?;
-
-    // Evaluation runs against the candidate content itself, so a program that
-    // reads another parameter of the same content sees the values the chain
-    // declared rather than this node's defaults.
-    let candidate = ActiveConfig {
-        view,
-        commitment: Commitment::Tentative,
-    };
-
-    // Pass 3 — the declared values, and the bounds on them.
+    // Pass 2 — the structural bounds, on the declared literals.
+    //
+    // **Bytecode overrides are not evaluated here.** A program's result can only
+    // be checked ahead of time when it takes no arguments, so any such pass is
+    // partial by construction — and it becomes more partial with every
+    // argument-taking parameter the registry gains. The runtime already has the
+    // complete mechanism for a program that misbehaves: a trap or an exhausted
+    // budget fails that tier and resolution falls through to the code-baked
+    // default and then to the fallback literal, deterministically and identically
+    // on every node (§7.3). Trusting one total mechanism is worth more than
+    // adding a second, incomplete one in front of it.
+    //
+    // What that leaves uncovered is bounded by the registry's own value forms.
+    // Every parameter whose bound must hold for the local node to *represent* the
+    // chain at all — the spent-bit width, the active-chain capacity, the
+    // aggregation ceiling, the vote denominator, the execution budget — is
+    // literal-only, so its declared value is checked below. The two bounded
+    // parameters that do admit a program (`block_size_limit`,
+    // `block_fill_threshold_percent`) can only be driven out of range into a
+    // *weaker rule* the whole chain applies alike — a limit that never binds, a
+    // fill threshold that never triggers — never into a value this node cannot
+    // hold. That is founder self-harm on a node-#0-signed content, not a
+    // consensus split and not a representation failure.
     let mut tx_fee_min = None;
     let mut tx_fee_max = None;
 
-    for entry in candidate.view.iter() {
+    for entry in view.iter() {
+        if entry.is_bytecode() {
+            continue;
+        }
         let spec = spec(entry.parameter_id());
-        let declared = if entry.is_bytecode() {
-            if spec.args != 0 {
-                // No acceptance-time check can cover every argument value, which
-                // is why an argument-taking parameter may not carry a bound.
-                continue;
-            }
-            let mut fuel = Fuel::new(candidate.fuel_limit());
-            match ConfigVm::execute(entry.value(), &[], &mut fuel, &candidate) {
-                VmOutcome::Completed(value) => value,
-                VmOutcome::Trapped(_) | VmOutcome::OutOfFuel => {
-                    return Err(ChainConfigError::BytecodeEvaluationFailed(spec.id));
-                }
-            }
-        } else {
-            read_le(entry.value())
-        };
+        let declared = read_le(entry.value());
 
         check_bound(spec.id, declared)?;
 
@@ -1180,9 +1174,10 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
         }
     }
 
-    // Pass 4 — the one invariant that spans two parameters, and therefore cannot
-    // live in a per-parameter check. An omitted parameter contributes its default,
-    // which is the value the chain will resolve for it.
+    // Pass 3 — the one invariant that spans two parameters, and therefore cannot
+    // live in a per-parameter check. A parameter absent from the content — or
+    // overridden by a program, whose result is not knowable here — contributes its
+    // code-baked default, which is the value resolution falls back to.
     let declared_or_default = |declared: Option<u64>, id: u8| match declared {
         Some(value) => value,
         None => spec(id).fallback,
@@ -1195,7 +1190,7 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
         ));
     }
 
-    Ok(candidate.view.content().len())
+    Ok(view.content().len())
 }
 
 /// The structural bounds, applied to a declared value.

@@ -809,11 +809,11 @@ fn the_fuel_limit_is_bounded_at_both_ends() {
 }
 
 #[test]
-fn an_over_budget_fuel_limit_is_refused_before_it_is_spent() {
-    // The ordering is the point: were the limit checked in entry order, a content
-    // pairing a huge limit with a runaway program would already have held the core
-    // for as long as the unchecked value asked before the bound was reached. The
-    // runaway program is framed *first*, so entry order alone would reach it first.
+fn an_over_budget_fuel_limit_is_refused_whatever_else_the_content_holds() {
+    // Acceptance no longer spends the budget, so there is no ordering hazard left
+    // to guard -- but the bound still matters, because *resolution* spends it on
+    // every accessor call that reaches a program. Framed alongside a runaway
+    // program, which is now accepted on its own.
     let payload = frame(&[
         Entry::Bytecode(parameter::VOTE_INTEREST, &RUNAWAY_PROGRAM),
         Entry::Literal(parameter::VM_FUEL_LIMIT, &u32::MAX.to_le_bytes()),
@@ -860,56 +860,88 @@ fn the_transaction_fee_range_may_not_be_inverted() {
 }
 
 #[test]
-fn an_argument_less_bytecode_override_is_bound_checked_at_acceptance() {
+fn a_program_under_a_bounded_parameter_is_not_bound_checked() {
+    // The consequence of dropping acceptance-time evaluation, stated as a test so
+    // it is a decision rather than a surprise: a program may drive a bounded
+    // parameter out of range. It is confined to the two bounded parameters that
+    // admit a program at all, and to a *weaker rule* the whole chain applies
+    // alike -- never to a value this node cannot represent, because every
+    // representation-critical bound sits on a literal-only parameter.
     let over = push_u16_program(MAX_BLOCK_SIZE as u16 + 1);
     let payload = frame(&[Entry::Bytecode(parameter::BLOCK_SIZE_LIMIT, &over)]);
+    assert!(accept_content(payload.as_slice()).is_ok());
+
+    let module = loaded(&[Entry::Bytecode(parameter::BLOCK_SIZE_LIMIT, &over)]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .block_size_limit(),
+        MAX_BLOCK_SIZE as u16 + 1
+    );
+
+    // The literal form of the same parameter is still checked.
+    let literal = frame(&[Entry::Literal(
+        parameter::BLOCK_SIZE_LIMIT,
+        &(MAX_BLOCK_SIZE as u16 + 1).to_le_bytes(),
+    )]);
     assert!(matches!(
-        accept_content(payload.as_slice()),
+        accept_content(literal.as_slice()),
         Err(ChainConfigError::BoundViolation(
             parameter::BLOCK_SIZE_LIMIT
         ))
     ));
-
-    let within = push_u16_program(1024);
-    let payload = frame(&[Entry::Bytecode(parameter::BLOCK_SIZE_LIMIT, &within)]);
-    assert!(accept_content(payload.as_slice()).is_ok());
 }
 
 #[test]
-fn an_argument_less_program_that_traps_rejects_the_content() {
+fn a_program_that_traps_is_accepted_and_falls_back_at_resolution() {
+    // Acceptance does not run programs: a partial check in front of a total
+    // mechanism buys nothing. An undefined opcode is a trap, the tier fails, and
+    // resolution falls through to the code-baked default -- deterministically, so
+    // every node reaches the same value.
     let payload = frame(&[Entry::Bytecode(
         parameter::VOTE_INTEREST,
         &UNDEFINED_OPCODE_PROGRAM,
     )]);
-    assert!(matches!(
-        accept_content(payload.as_slice()),
-        Err(ChainConfigError::BytecodeEvaluationFailed(
-            parameter::VOTE_INTEREST
-        ))
-    ));
-}
+    assert!(accept_content(payload.as_slice()).is_ok());
 
-#[test]
-fn an_argument_less_program_that_runs_out_of_fuel_rejects_the_content() {
-    let payload = frame(&[Entry::Bytecode(parameter::VOTE_INTEREST, &RUNAWAY_PROGRAM)]);
-    assert!(matches!(
-        accept_content(payload.as_slice()),
-        Err(ChainConfigError::BytecodeEvaluationFailed(
-            parameter::VOTE_INTEREST
-        ))
-    ));
-}
-
-#[test]
-fn an_argument_taking_program_is_not_evaluated_at_acceptance() {
-    // It cannot be: no acceptance-time check covers every argument value. A
-    // program that would trap on some argument is accepted here and falls back at
-    // runtime, deterministically and identically on every node.
-    let payload = frame(&[Entry::Bytecode(
-        parameter::REGISTRATION_PRICE,
+    let module = loaded(&[Entry::Bytecode(
+        parameter::VOTE_INTEREST,
         &UNDEFINED_OPCODE_PROGRAM,
     )]);
+    let config = module.active_configuration().expect("handle");
+    assert_eq!(config.vote_interest(), 5);
+    // Stable across calls: the failure is a property of the program, not of state.
+    assert_eq!(config.vote_interest(), 5);
+}
+
+#[test]
+fn a_program_that_runs_out_of_fuel_is_accepted_and_falls_back() {
+    let payload = frame(&[Entry::Bytecode(parameter::VOTE_INTEREST, &RUNAWAY_PROGRAM)]);
     assert!(accept_content(payload.as_slice()).is_ok());
+
+    let module = loaded(&[Entry::Bytecode(parameter::VOTE_INTEREST, &RUNAWAY_PROGRAM)]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .vote_interest(),
+        5
+    );
+}
+
+#[test]
+fn no_program_is_evaluated_at_acceptance() {
+    // Neither form is run: an argument-taking program's result is unknowable
+    // ahead of time, and an argument-less one is left to the same total runtime
+    // mechanism rather than to a second, partial check.
+    for id in [parameter::REGISTRATION_PRICE, parameter::VOTE_INTEREST] {
+        let payload = frame(&[Entry::Bytecode(id, &UNDEFINED_OPCODE_PROGRAM)]);
+        assert!(
+            accept_content(payload.as_slice()).is_ok(),
+            "identifier {id} should be accepted with an unevaluated program"
+        );
+    }
 }
 
 #[test]
