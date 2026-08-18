@@ -556,22 +556,31 @@ fn a_width_mismatched_literal_is_rejected() {
 
 #[test]
 fn bytecode_under_a_literal_only_parameter_is_rejected() {
+    // The set is derived from the registry rather than written out here, so a
+    // parameter whose form changes cannot silently escape this test -- which is how
+    // the hand-written list drifted more than once while the value-form rules were
+    // being settled.
     let program = push_u8_program(4);
-    for id in [
-        parameter::BLOCK_SIZE_LIMIT,
-        parameter::MAX_BLOCK_UTXO_OUTPUT,
-        parameter::MAX_AGGREGATED_SIGNATURES,
-        parameter::ACTIVE_CHAIN_LENGTH,
-        parameter::SCORING_MATRIX,
-        parameter::VM_FUEL_LIMIT,
-    ] {
+    let mut checked = 0;
+    for id in 1..=PARAMETER_COUNT as u8 {
+        let spec = parameter_spec(id).expect("identifiers are allocated densely");
+        if spec.bytecode_allowed {
+            continue;
+        }
         let payload = frame(&[Entry::Bytecode(id, &program)]);
-        let error = accept_content(payload.as_slice())
-            .expect_err("a literal-only parameter refuses a program");
         assert!(
-            matches!(error, ChainConfigError::BytecodeNotPermitted(rejected) if rejected == id)
+            matches!(accept_content(payload.as_slice()),
+                     Err(ChainConfigError::BytecodeNotPermitted(rejected)) if rejected == id),
+            "identifier {id} is literal-only and must refuse a program"
         );
+        checked += 1;
     }
+    // Every radio identifier is in that set by rule, so the count cannot fall below
+    // the nine of them plus the four non-radio literal-only parameters.
+    assert!(
+        checked >= 13,
+        "only {checked} literal-only parameters found; the rules require at least 13"
+    );
 }
 
 #[test]

@@ -169,6 +169,9 @@ pub mod parameter {
     /// [`MAX_AGGREGATED_SIGNATURES`], applied as a clamp.
     pub const REQUIRED_SUPPORT: u8 = 10;
 
+    // Radio runtime tuning, 11 through 19. Literal-only and argument-less by rule
+    // (§4.5, §10.2) — see `RADIO_IDS`, which asserts both.
+
     /// Radio: minimum interval between echo requests, minutes.
     pub const ECHO_REQUEST_MINIMAL_INTERVAL: u8 = 11;
     /// Radio: target interval between echo messages, seconds.
@@ -327,12 +330,12 @@ const REGISTRY: [ParameterSpec; 29] = [
         10_000,
     ),
     spec_of(parameter::REQUIRED_SUPPORT, 1, 0, true, 3),
-    spec_of(parameter::ECHO_REQUEST_MINIMAL_INTERVAL, 2, 0, true, 1440),
-    spec_of(parameter::ECHO_MESSAGES_TARGET_INTERVAL, 1, 0, true, 100),
-    spec_of(parameter::ECHO_GATHERING_TIMEOUT, 1, 0, true, 10),
-    spec_of(parameter::DELAY_BETWEEN_TX_PACKETS, 2, 0, true, 200),
-    spec_of(parameter::DELAY_BETWEEN_TX_MESSAGES, 1, 0, true, 20),
-    spec_of(parameter::RELAY_POSITION_DELAY, 1, 0, true, 10),
+    spec_of(parameter::ECHO_REQUEST_MINIMAL_INTERVAL, 2, 0, false, 1440),
+    spec_of(parameter::ECHO_MESSAGES_TARGET_INTERVAL, 1, 0, false, 100),
+    spec_of(parameter::ECHO_GATHERING_TIMEOUT, 1, 0, false, 10),
+    spec_of(parameter::DELAY_BETWEEN_TX_PACKETS, 2, 0, false, 200),
+    spec_of(parameter::DELAY_BETWEEN_TX_MESSAGES, 1, 0, false, 20),
+    spec_of(parameter::RELAY_POSITION_DELAY, 1, 0, false, 10),
     spec_of(
         parameter::SCORING_MATRIX,
         SCORING_MATRIX_LEN as u8,
@@ -348,10 +351,10 @@ const REGISTRY: [ParameterSpec; 29] = [
         parameter::RETRY_INTERVAL_FOR_MISSING_PACKETS,
         1,
         0,
-        true,
+        false,
         60,
     ),
-    spec_of(parameter::TX_MAXIMUM_RANDOM_DELAY, 2, 0, true, 200),
+    spec_of(parameter::TX_MAXIMUM_RANDOM_DELAY, 2, 0, false, 200),
     spec_of(parameter::BLOCK_FILL_THRESHOLD_PERCENT, 1, 0, true, 80),
     spec_of(parameter::ACTIVE_CHAIN_LENGTH, 2, 0, false, 500),
     spec_of(
@@ -443,6 +446,39 @@ const _: () = {
     let mut index = 0;
     while index < PER_BUILD_LIMITED_IDS.len() {
         assert!(!REGISTRY[PER_BUILD_LIMITED_IDS[index] as usize - 1].bytecode_allowed);
+        index += 1;
+    }
+};
+
+/// The radio runtime-tuning identifiers, 11 through 19.
+///
+/// These are **literal-only by rule**, and argument-less by rule (§10.2). The radio
+/// does not call an accessor: it consumes a snapshot the node runtime builds at a
+/// configuration change and publishes to the other core, where several real-time
+/// tasks hold their own copies. A program could therefore only ever compute from
+/// other configuration parameters — the radio's own quantities are node-specific and
+/// deliberately unreachable — so it would buy no expressiveness while adding an
+/// evaluation whose outcome decides whether a pacing constant is the chain's value
+/// or a fallback. For pure tuning constants on a timing-critical path that variance
+/// is the whole cost and none of the benefit.
+const RADIO_IDS: [u8; 9] = [
+    parameter::ECHO_REQUEST_MINIMAL_INTERVAL,
+    parameter::ECHO_MESSAGES_TARGET_INTERVAL,
+    parameter::ECHO_GATHERING_TIMEOUT,
+    parameter::DELAY_BETWEEN_TX_PACKETS,
+    parameter::DELAY_BETWEEN_TX_MESSAGES,
+    parameter::RELAY_POSITION_DELAY,
+    parameter::SCORING_MATRIX,
+    parameter::RETRY_INTERVAL_FOR_MISSING_PACKETS,
+    parameter::TX_MAXIMUM_RANDOM_DELAY,
+];
+
+const _: () = {
+    let mut index = 0;
+    while index < RADIO_IDS.len() {
+        let spec = &REGISTRY[RADIO_IDS[index] as usize - 1];
+        assert!(!spec.bytecode_allowed);
+        assert!(spec.args == 0);
         index += 1;
     }
 };
