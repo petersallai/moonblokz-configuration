@@ -224,13 +224,15 @@ pub struct ParameterSpec {
     pub args: u8,
     /// Whether a bytecode *override* is permitted.
     ///
-    /// Literal-only parameters are those whose value must be knowable at
-    /// acceptance time under every condition: the array-typed one (the VM has no
-    /// array-valued result form), the execution-budget parameter itself
-    /// (resolving it must not require running a program), and those carrying a
-    /// bound that an argument-taking program could evade. A bound *alone* does
-    /// not force literal-only — an argument-less program is evaluated once at
-    /// acceptance and bound-checked exactly like a literal.
+    /// Literal-only where a program could not be held to the parameter's bound:
+    /// the array-typed one (the VM has no array-valued result form), the
+    /// execution-budget parameter itself (resolving it must not require running a
+    /// program), and — the load-bearing case — every parameter whose bound is
+    /// measured against a compile-time constant of *this build*, since such a
+    /// bound may only be answered by refusal at acceptance and never by a
+    /// resolution-time fallback (see [`PER_BUILD_LIMITED_IDS`] and [`bounded`]).
+    /// A bound against a *universal* limit does not force literal-only: the
+    /// resolution guard holds a computed value to it.
     pub bytecode_allowed: bool,
     /// Tier 2 — the code-baked default, itself either a literal or a program.
     pub default: DefaultValue,
@@ -879,11 +881,22 @@ impl<'a> ActiveConfig<'a> {
     }
 
     /// FR56 minimum transaction fee per byte.
+    ///
+    /// **The pair is not guaranteed ordered.** Acceptance checks
+    /// `min <= max` on declared literals, which catches a founder's typo in
+    /// `config-encoder` before a chain exists, but the relation spans two
+    /// parameters and no per-parameter predicate can see both — so when either fee
+    /// is computed by a program the relation is unchecked. Ratified 2026-08-18: the
+    /// consumer resolves an inconsistent range **at the point of use**, and must
+    /// not assume `min <= max`. Note that whatever it does must be deterministic,
+    /// since both nodes read the same content and must reach the same fee.
     pub fn tx_fee_per_byte_min(&self) -> u64 {
         self.resolve(parameter::TX_FEE_PER_BYTE_MIN, &[])
     }
 
-    /// FR56 maximum transaction fee per byte.
+    /// FR56 maximum transaction fee per byte. See
+    /// [`tx_fee_per_byte_min`](Self::tx_fee_per_byte_min): the pair is not
+    /// guaranteed ordered, and the consumer resolves an inconsistent range.
     pub fn tx_fee_per_byte_max(&self) -> u64 {
         self.resolve(parameter::TX_FEE_PER_BYTE_MAX, &[])
     }
@@ -1239,6 +1252,13 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
     // live in a per-parameter check. A parameter absent from the content — or
     // overridden by a program, whose result is not knowable here — contributes its
     // code-baked default, which is the value resolution falls back to.
+    //
+    // This is a founder-facing diagnostic, not a guarantee: `config-encoder` runs
+    // this pass, so a typo in two declared literals is caught before a chain
+    // exists. It cannot be a guarantee, because a computed fee is unknowable here
+    // and the relation cannot be enforced at resolution either — a per-parameter
+    // guard sees one value. Ratified 2026-08-18: the consumer resolves an
+    // inconsistent range at the point of use, and the accessors say so.
     let declared_or_default = |declared: Option<u64>, id: u8| match declared {
         Some(value) => value,
         None => spec(id).fallback,
