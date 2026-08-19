@@ -57,15 +57,16 @@ use moonblokz_vm::{Fuel, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
 /// A chain declaring `max_block_utxo_output` above this cannot be represented by
 /// the local node's cache, so the acceptance pass rejects it (FR8).
 ///
-/// Two things are **not** true yet, and saying so here is cheaper than letting a
-/// reader assume them. The blockchain will pin this constant to its real
-/// spent-bit width with a monomorphization-time assertion, but that lands in
-/// Story 5.8: the blockchain does not depend on this crate until then, so
-/// nothing currently prevents the two from drifting. And the bound is dormant at
-/// the default width — the parameter is one byte wide, so a declared literal
-/// cannot exceed 255 while this capacity is 256, and no legal content can fail
-/// the check. It earns its keep for a build whose width is below 255, which is
-/// what Story 5.8's byte-width const generic makes expressible.
+/// One thing is **not** true yet, and saying so here is cheaper than letting a
+/// reader assume it: the blockchain will pin this constant to its real spent-bit
+/// width with a monomorphization-time assertion, but that lands in Story 5.8 —
+/// the blockchain does not depend on this crate until then, so nothing currently
+/// prevents the two from drifting.
+///
+/// The bound itself is live. `max_block_utxo_output` is two bytes wide precisely
+/// so that it can be declared above this capacity and refused: while it was one
+/// byte, a declared literal could not exceed 255, the check could not fail, and
+/// the top of the range was unreachable.
 pub const UTXO_UNSPENT_BITS: u16 = 256;
 
 /// Compile-time active-chain capacity of the local build.
@@ -320,7 +321,7 @@ const REGISTRY: [ParameterSpec; 29] = [
     spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, 0, true, 60_000),
     spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, 0, true, 30_000),
     spec_of(parameter::BLOCK_SIZE_LIMIT, 2, 0, false, 2016),
-    spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 1, 0, false, 255),
+    spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 2, 0, false, 255),
     spec_of(parameter::MAX_AGGREGATED_SIGNATURES, 1, 0, false, 50),
     spec_of(parameter::VOTE_SCALE, 2, 0, true, 1000),
     spec_of(parameter::VOTE_INTEREST, 1, 0, true, 5),
@@ -840,11 +841,15 @@ impl<'a> ActiveConfig<'a> {
 
     /// Maximum UTXO outputs per block.
     ///
-    /// `u8` is correct *because* the FR8 bound moved upstream: acceptance sees
-    /// the raw declared value, where an out-of-range number is representable and
-    /// is rejected, so only legal values reach this accessor.
-    pub fn max_utxo_outputs(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::MAX_BLOCK_UTXO_OUTPUT, &[]))
+    /// Two bytes wide, and `u16` on the way out, so that the whole capacity is
+    /// reachable: the ceiling is `UTXO_UNSPENT_BITS`, which a one-byte literal
+    /// could never reach and never exceed — the bound was unfailable, and the
+    /// top of the range unusable. The width also makes the FR8 check real work,
+    /// because acceptance sees the raw declared value, where an out-of-range
+    /// number is now representable and is rejected; only legal values reach
+    /// this accessor.
+    pub fn max_utxo_outputs(&self) -> u16 {
+        narrow_u16(self.resolve(parameter::MAX_BLOCK_UTXO_OUTPUT, &[]))
     }
 
     /// Maximum aggregated signatures per approval-evidence block (ADR-015).

@@ -795,23 +795,27 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
 
 #[test]
 fn max_block_utxo_output_is_bounded_by_the_spent_bit_width() {
-    // The bound is `≤ UTXO_UNSPENT_BITS`, and the parameter is one byte wide, so
-    // the widest legal literal is in range on this build...
-    let at_width_max = frame(&[Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &[255])]);
-    assert!(accept_content(at_width_max.as_slice()).is_ok());
+    // Two bytes wide, so the whole capacity is declarable — and exceeding it is
+    // now representable, which is what makes the bound do work at all.
+    let at_capacity = frame(&[Entry::Literal(
+        parameter::MAX_BLOCK_UTXO_OUTPUT,
+        &UTXO_UNSPENT_BITS.to_le_bytes(),
+    )]);
+    assert!(accept_content(at_capacity.as_slice()).is_ok());
+    assert!(check_bound(parameter::MAX_BLOCK_UTXO_OUTPUT, UTXO_UNSPENT_BITS as u64).is_ok());
 
-    // At zero no transaction output could ever be included in a block.
-    let zero = frame(&[Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &[0])]);
+    // One above the capacity is rejected by the bound itself, not by the width
+    // rule: this is the case a one-byte parameter could never express.
+    let above = frame(&[Entry::Literal(
+        parameter::MAX_BLOCK_UTXO_OUTPUT,
+        &(UTXO_UNSPENT_BITS + 1).to_le_bytes(),
+    )]);
     assert!(matches!(
-        accept_content(zero.as_slice()),
+        accept_content(above.as_slice()),
         Err(ChainConfigError::BoundViolation(
             parameter::MAX_BLOCK_UTXO_OUTPUT
         ))
     ));
-    assert!(check_bound(parameter::MAX_BLOCK_UTXO_OUTPUT, UTXO_UNSPENT_BITS as u64).is_ok());
-
-    // ... a value above it is rejected twice over: by the bound, and — because a
-    // wider value needs a wider literal — by the exact-width rule first.
     assert!(matches!(
         check_bound(
             parameter::MAX_BLOCK_UTXO_OUTPUT,
@@ -821,12 +825,24 @@ fn max_block_utxo_output_is_bounded_by_the_spent_bit_width() {
             parameter::MAX_BLOCK_UTXO_OUTPUT
         ))
     ));
-    let too_wide = frame(&[Entry::Literal(
+
+    // At zero no transaction output could ever be included in a block.
+    let zero = frame(&[Entry::Literal(
         parameter::MAX_BLOCK_UTXO_OUTPUT,
-        &(UTXO_UNSPENT_BITS + 1).to_le_bytes(),
+        &0u16.to_le_bytes(),
     )]);
     assert!(matches!(
-        accept_content(too_wide.as_slice()),
+        accept_content(zero.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::MAX_BLOCK_UTXO_OUTPUT
+        ))
+    ));
+
+    // The exact-width rule still stands in front of all of it: the declared
+    // width is permanent, so a one-byte literal is malformed rather than lenient.
+    let narrow = frame(&[Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &[255])]);
+    assert!(matches!(
+        accept_content(narrow.as_slice()),
         Err(ChainConfigError::ValueWidthMismatch(
             parameter::MAX_BLOCK_UTXO_OUTPUT
         ))
