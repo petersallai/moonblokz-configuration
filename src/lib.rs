@@ -51,12 +51,21 @@ use moonblokz_vm::{Fuel, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
 // Compile-time capacities
 // ---------------------------------------------------------------------------
 
-/// Per-block UTXO spent-bit width of the local build.
+/// Per-block UTXO spent-bit width of the local build — the *capacity*, against
+/// which the chain-configured `max_block_utxo_output` is the actual value.
 ///
 /// A chain declaring `max_block_utxo_output` above this cannot be represented by
-/// the local node's cache, so the acceptance pass rejects it (FR8). The value is
-/// pinned to the blockchain's real spent-bit width by a monomorphization-time
-/// assertion **in the blockchain**, so the two cannot drift silently.
+/// the local node's cache, so the acceptance pass rejects it (FR8).
+///
+/// Two things are **not** true yet, and saying so here is cheaper than letting a
+/// reader assume them. The blockchain will pin this constant to its real
+/// spent-bit width with a monomorphization-time assertion, but that lands in
+/// Story 5.8: the blockchain does not depend on this crate until then, so
+/// nothing currently prevents the two from drifting. And the bound is dormant at
+/// the default width — the parameter is one byte wide, so a declared literal
+/// cannot exceed 255 while this capacity is 256, and no legal content can fail
+/// the check. It earns its keep for a build whose width is below 255, which is
+/// what Story 5.8's byte-width const generic makes expressible.
 pub const UTXO_UNSPENT_BITS: u16 = 256;
 
 /// Compile-time active-chain capacity of the local build.
