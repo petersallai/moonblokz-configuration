@@ -26,7 +26,7 @@
 //! ```text
 //! # half the inter-block interval, read rather than restated
 //! grace_period_window_ms = {
-//!     GETPARAM @inter_block_interval_ms, 0
+//!     GETCONFIG @inter_block_interval_ms, 0
 //!     PUSH 2
 //!     DIV
 //!     RET
@@ -277,11 +277,11 @@ fn parse(source: &str) -> Result<Vec<Override>, EncodeError> {
 }
 
 /// Rewrites `@name` references to registry identifiers and checks every
-/// `GETPARAM`'s declared argument count against the registry.
+/// `GETCONFIG`'s declared argument count against the registry.
 ///
 /// The assembler cannot do either: it belongs to `moonblokz-vm`, which knows
 /// nothing about the registry. The layering is visible in the syntax on purpose —
-/// `GETPARAM` takes a number, and the name is this tool's convenience.
+/// `GETCONFIG` takes a number, and the name is this tool's convenience.
 fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeError> {
     let mut resolved = String::new();
 
@@ -309,7 +309,7 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
         line.push_str(rest);
         line.push_str(comment);
 
-        check_getparam_arity(line_no, &line)?;
+        check_getconfig_arity(line_no, &line)?;
         resolved.push_str(&line);
         resolved.push('\n');
     }
@@ -317,15 +317,15 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
     Ok(resolved)
 }
 
-/// Refuses a `GETPARAM` whose declared argument count contradicts the registry.
+/// Refuses a `GETCONFIG` whose declared argument count contradicts the registry.
 ///
 /// The host seam would decline such a call at runtime and the parameter would
 /// silently fall back to its default; catching it here is what turns that into a
 /// diagnostic naming the line.
-fn check_getparam_arity(line_no: usize, line: &str) -> Result<(), EncodeError> {
+fn check_getconfig_arity(line_no: usize, line: &str) -> Result<(), EncodeError> {
     // A label may precede an instruction on the same line (specification §7.2.4),
     // so the mnemonic is not always the first token. Missing that would silently
-    // skip the check for a labelled `GETPARAM` — and the program would then fall
+    // skip the check for a labelled `GETCONFIG` — and the program would then fall
     // back on-device with no diagnostic, which is exactly what this check exists
     // to prevent.
     let code = strip_label(line.split(';').next().unwrap_or("").trim());
@@ -333,7 +333,7 @@ fn check_getparam_arity(line_no: usize, line: &str) -> Result<(), EncodeError> {
     let Some(mnemonic) = tokens.next() else {
         return Ok(());
     };
-    if !mnemonic.eq_ignore_ascii_case("GETPARAM") {
+    if !mnemonic.eq_ignore_ascii_case("GETCONFIG") {
         return Ok(());
     }
 
@@ -344,7 +344,7 @@ fn check_getparam_arity(line_no: usize, line: &str) -> Result<(), EncodeError> {
     if operands.len() != 2 {
         return Err(err(
             line_no,
-            "GETPARAM takes a parameter identifier and an argument count",
+            "GETCONFIG takes a parameter identifier and an argument count",
         ));
     }
     let (Ok(id), Ok(argc)) = (parse_number(operands[0]), parse_number(operands[1])) else {
@@ -355,14 +355,14 @@ fn check_getparam_arity(line_no: usize, line: &str) -> Result<(), EncodeError> {
     let Some(spec) = u8::try_from(id).ok().and_then(parameter_spec) else {
         return Err(err(
             line_no,
-            format!("GETPARAM names identifier {id}, which the registry does not allocate"),
+            format!("GETCONFIG names identifier {id}, which the registry does not allocate"),
         ));
     };
     if argc != spec.args as u64 {
         return Err(err(
             line_no,
             format!(
-                "GETPARAM declares {argc} argument(s) for identifier {id}, but the registry records arity {}",
+                "GETCONFIG declares {argc} argument(s) for identifier {id}, but the registry records arity {}",
                 spec.args
             ),
         ));
@@ -565,7 +565,7 @@ mod tests {
         let module = loaded(
             "inter_block_interval_ms = 90000\n\
              grace_period_window_ms = {\n\
-             \x20   GETPARAM @inter_block_interval_ms, 0   ; read, do not restate\n\
+             \x20   GETCONFIG @inter_block_interval_ms, 0   ; read, do not restate\n\
              \x20   PUSH 2\n\
              \x20   DIV\n\
              \x20   RET\n\
@@ -614,9 +614,9 @@ mod tests {
     }
 
     #[test]
-    fn a_getparam_arity_that_contradicts_the_registry_is_refused() {
+    fn a_getconfig_arity_that_contradicts_the_registry_is_refused() {
         let error = encode(
-            "vote_interest = {\n    GETPARAM @inter_block_interval_ms, 1\n    RET\n}\n",
+            "vote_interest = {\n    GETCONFIG @inter_block_interval_ms, 1\n    RET\n}\n",
             KEY,
         )
         .expect_err("identifier 1 is argument-less");
@@ -625,8 +625,8 @@ mod tests {
     }
 
     #[test]
-    fn a_getparam_naming_an_unallocated_identifier_is_refused() {
-        let error = encode("vote_interest = {\n    GETPARAM 120, 0\n    RET\n}\n", KEY)
+    fn a_getconfig_naming_an_unallocated_identifier_is_refused() {
+        let error = encode("vote_interest = {\n    GETCONFIG 120, 0\n    RET\n}\n", KEY)
             .expect_err("identifier 120 is unallocated");
         assert_eq!(error.line, 2);
         assert!(error.message.contains("does not allocate"));
@@ -664,7 +664,7 @@ mod tests {
         // Reading another parameter is legitimate and must still encode.
         assert!(
             encode(
-                "vote_interest = {\n    GETPARAM @vote_scale, 0\n    RET\n}\n",
+                "vote_interest = {\n    GETCONFIG @vote_scale, 0\n    RET\n}\n",
                 KEY,
             )
             .is_ok(),
@@ -681,11 +681,11 @@ mod tests {
     }
 
     #[test]
-    fn a_labelled_getparam_is_still_arity_checked() {
+    fn a_labelled_getconfig_is_still_arity_checked() {
         // A label may precede an instruction on the same line, so the mnemonic is
         // not always the first token.
         let error = encode(
-            "vote_interest = {\n    top: GETPARAM @inter_block_interval_ms, 1\n    RET\n}\n",
+            "vote_interest = {\n    top: GETCONFIG @inter_block_interval_ms, 1\n    RET\n}\n",
             KEY,
         )
         .expect_err("identifier 1 is argument-less");

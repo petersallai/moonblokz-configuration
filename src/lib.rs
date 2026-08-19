@@ -45,7 +45,7 @@ use moonblokz_chain_types::{
     ChainConfigBlockPayloadView, ConfigValueView, HEADER_SIZE, MAX_BLOCK_SIZE, MAX_PAYLOAD_SIZE,
 };
 use moonblokz_crypto::MAX_AGGREGATED_SIGNATURES;
-use moonblokz_vm::{Fuel, HOST_RESOLVE_PARAMETER, Vm, VmHost, VmOutcome};
+use moonblokz_vm::{Fuel, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
 
 // ---------------------------------------------------------------------------
 // Compile-time capacities
@@ -100,7 +100,7 @@ pub const VM_FUEL_LIMIT_MAX: u32 = 20_000;
 const VM_STACK_DEPTH: usize = 16;
 /// Local-slot count of the configuration VM (specification §12).
 const VM_LOCAL_SLOTS: usize = 8;
-/// Maximum `GETPARAM` nesting depth (specification §12).
+/// Maximum `GETCONFIG` nesting depth (specification §12).
 const VM_MAX_NESTING: usize = 3;
 
 /// The machine every configuration program runs on. Its stack and slot array are
@@ -228,7 +228,7 @@ pub struct ParameterSpec {
     /// no variable-length integer parsing, no ambiguity about zero-padding, and
     /// a width mismatch is a clean rejection rather than a reinterpretation.
     pub width: u8,
-    /// Accessor arity — hence the argument count a `GETPARAM` naming this
+    /// Accessor arity — hence the argument count a `GETCONFIG` naming this
     /// identifier must declare.
     pub args: u8,
     /// Whether a bytecode *override* is permitted.
@@ -513,7 +513,7 @@ fn spec(id: u8) -> &'static ParameterSpec {
 /// The registry record for `id`, or `None` if the registry does not allocate it.
 ///
 /// The host-side `config-encoder` reads the registry through this: it needs the
-/// literal width to encode a value, the arity to check a `GETPARAM`, and the
+/// literal width to encode a value, the arity to check a `GETCONFIG`, and the
 /// permitted value form to refuse a program where one is not allowed. Runtime
 /// paths use the infallible lookup above.
 pub fn parameter_spec(id: u8) -> Option<&'static ParameterSpec> {
@@ -800,7 +800,7 @@ pub struct ActiveConfig<'a> {
     /// The envelope, walked and validated **once** when the handle was acquired.
     /// Every accessor re-resolves against it, but none re-validates the framing:
     /// re-deriving the content boundary per accessor — twice per accessor, in
-    /// fact, and again per nested `GETPARAM` — was measurable work for no
+    /// fact, and again per nested `GETCONFIG` — was measurable work for no
     /// information.
     view: ChainConfigBlockPayloadView<'a>,
     commitment: Commitment,
@@ -1027,7 +1027,7 @@ impl<'a> ActiveConfig<'a> {
     /// **Each tier that needs a budget starts a fresh one**: if a lower tier inherited an exhausted budget, then whenever
     /// exhaustion was the failure cause the tier below could never run, and it
     /// would be dead code. Sharing happens along the other axis — a nested
-    /// `GETPARAM` draws from the budget of the invocation that started it, so a
+    /// `GETCONFIG` draws from the budget of the invocation that started it, so a
     /// program cannot evade the bound by composing sub-evaluations.
     fn resolve(&self, id: u8, args: &[u64]) -> u64 {
         let mut fuel = Fuel::new(self.fuel_limit());
@@ -1108,7 +1108,7 @@ impl<'a> ActiveConfig<'a> {
 
 impl VmHost for ActiveConfig<'_> {
     fn call(&self, func_id: u16, selector: u8, args: &[u64], fuel: &mut Fuel) -> Option<u64> {
-        if func_id != HOST_RESOLVE_PARAMETER || !is_allocated(selector) {
+        if func_id != HOST_RESOLVE_CONFIG || !is_allocated(selector) {
             return None;
         }
         let spec = spec(selector);

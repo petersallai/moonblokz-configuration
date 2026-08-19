@@ -95,9 +95,9 @@ fn push_u16_program(value: u16) -> [u8; 4] {
     [op::PUSH_U16, bytes[0], bytes[1], op::RET]
 }
 
-/// `GETPARAM id, argc; RET`
-const fn getparam_program(id: u8, argc: u8) -> [u8; 4] {
-    [op::GETPARAM, id, argc, op::RET]
+/// `GETCONFIG id, argc; RET`
+const fn getconfig_program(id: u8, argc: u8) -> [u8; 4] {
+    [op::GETCONFIG, id, argc, op::RET]
 }
 
 /// `JMP -3` — a program that never terminates, so it can only end on fuel.
@@ -222,7 +222,7 @@ fn bytecode_reads_another_parameter_of_the_same_content() {
     // `grace_period_window_ms = inter_block_interval_ms / 2`, reading identifier 1
     // rather than restating its value.
     let program = [
-        op::GETPARAM,
+        op::GETCONFIG,
         parameter::INTER_BLOCK_INTERVAL_MS,
         0,
         op::PUSH_U8,
@@ -243,7 +243,12 @@ fn bytecode_reads_another_parameter_of_the_same_content() {
 fn nested_resolution_sees_the_referenced_parameter_default() {
     // Identifier 1 is not overridden, so the nested resolution falls to its
     // code-baked default and the caller still gets a value.
-    let program = [op::GETPARAM, parameter::INTER_BLOCK_INTERVAL_MS, 0, op::RET];
+    let program = [
+        op::GETCONFIG,
+        parameter::INTER_BLOCK_INTERVAL_MS,
+        0,
+        op::RET,
+    ];
     let module = loaded(&[Entry::Bytecode(parameter::GRACE_PERIOD_WINDOW_MS, &program)]);
     let config = module.active_configuration().expect("handle");
 
@@ -252,13 +257,13 @@ fn nested_resolution_sees_the_referenced_parameter_default() {
 
 #[test]
 fn a_declared_argument_count_that_contradicts_the_registry_is_declined() {
-    // `GETPARAM 1, 1` declares one argument for an argument-less parameter. The
+    // `GETCONFIG 1, 1` declares one argument for an argument-less parameter. The
     // host owns the registry, so the host is where the disagreement is caught;
     // it reaches the program as a failed call and the tier falls through.
     let program = [
         op::PUSH_U8,
         0,
-        op::GETPARAM,
+        op::GETCONFIG,
         parameter::INTER_BLOCK_INTERVAL_MS,
         1,
         op::RET,
@@ -273,7 +278,7 @@ fn a_declared_argument_count_that_contradicts_the_registry_is_declined() {
 
 #[test]
 fn an_unallocated_identifier_is_declined_at_the_host_seam() {
-    let program = getparam_program(120, 0);
+    let program = getconfig_program(120, 0);
     let module = loaded(&[Entry::Bytecode(parameter::REGISTRATION_PRICE, &program)]);
     let config = module.active_configuration().expect("handle");
 
@@ -411,14 +416,14 @@ fn tier_two_starts_from_a_fresh_budget_after_tier_one_exhausts_one() {
 
 #[test]
 fn a_self_referential_program_resolves_to_the_default_it_cannot_reach() {
-    // `grace_period_window_ms = GETPARAM grace_period_window_ms`. The host
+    // `grace_period_window_ms = GETCONFIG grace_period_window_ms`. The host
     // re-enters the VM, and the depth counter travels in `Fuel`, so the recursion
     // stops at the fixed nesting limit rather than on the native stack. The
-    // innermost `GETPARAM` traps, that tier fails, and the sub-evaluation returns
+    // innermost `GETCONFIG` traps, that tier fails, and the sub-evaluation returns
     // the code-baked default — so the outer program *completes*, carrying the
     // default outward. Acceptance therefore accepts the content: a cycle is a
     // runtime condition with the ordinary fallback outcome, not invalidity.
-    let program = getparam_program(parameter::GRACE_PERIOD_WINDOW_MS, 0);
+    let program = getconfig_program(parameter::GRACE_PERIOD_WINDOW_MS, 0);
     let module = loaded(&[Entry::Bytecode(parameter::GRACE_PERIOD_WINDOW_MS, &program)]);
     let config = module.active_configuration().expect("handle");
 
@@ -430,8 +435,8 @@ fn a_self_referential_program_resolves_to_the_default_it_cannot_reach() {
 
 #[test]
 fn a_two_parameter_cycle_terminates_the_same_way() {
-    let first = getparam_program(parameter::GRACE_PERIOD_WINDOW_MS, 0);
-    let second = getparam_program(parameter::INTER_BLOCK_INTERVAL_MS, 0);
+    let first = getconfig_program(parameter::GRACE_PERIOD_WINDOW_MS, 0);
+    let second = getconfig_program(parameter::INTER_BLOCK_INTERVAL_MS, 0);
     let module = loaded(&[
         Entry::Bytecode(parameter::INTER_BLOCK_INTERVAL_MS, &first),
         Entry::Bytecode(parameter::GRACE_PERIOD_WINDOW_MS, &second),
@@ -452,7 +457,7 @@ fn a_cycle_through_an_argument_taking_parameter_terminates_at_runtime() {
     let program = [
         op::ARG,
         0,
-        op::GETPARAM,
+        op::GETCONFIG,
         parameter::REGISTRATION_PRICE,
         1,
         op::RET,
