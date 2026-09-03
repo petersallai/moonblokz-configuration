@@ -36,9 +36,30 @@
 use std::fmt;
 
 use moonblokz_chain_types::ChainConfigPayloadBuilder;
-use moonblokz_configuration::{ChainConfigError, accept_content, parameter, parameter_spec};
+use moonblokz_configuration::{
+    BuildLimits, ChainConfigError, accept_content, limits_are_expressible, parameter,
+    parameter_spec,
+};
 use moonblokz_crypto::{Crypto, CryptoTrait, PRIVATE_KEY_SIZE};
 use moonblokz_vm_asm::assemble;
+
+/// The build this tool encodes for.
+///
+/// Two of the acceptance checks measure a declared value against a capacity of
+/// the *node's* build rather than against anything universal (the per-block UTXO
+/// spent-bit width and the active-chain window), so "whatever this tool accepts,
+/// the network accepts" is a statement about a particular build. These are the
+/// reference firmware's values, which is what a founder encoding for the standard
+/// build wants; content encoded here is accepted by any node whose capacities are
+/// at least these. A node built smaller will refuse it — correctly, and with the
+/// identifier in the error — which is the same answer it would give to any chain
+/// it cannot honour.
+const REFERENCE_BUILD_LIMITS: BuildLimits = BuildLimits {
+    utxo_unspent_bits: 256,
+    snake_chain_length_max: 500,
+};
+
+const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
 
 /// Parameter names, as they appear in this tool's input and as `@name` inside a
 /// program.
@@ -200,8 +221,8 @@ pub fn encode(source: &str, private_key: [u8; PRIVATE_KEY_SIZE]) -> Result<Vec<u
     let payload = builder.build_signed(&crypto).to_vec();
 
     // The runtime's own acceptance pass, not a restatement of it: whatever this
-    // tool accepts, the network accepts.
-    accept_content(&payload).map_err(|error| err(0, describe(&error)))?;
+    // tool accepts, the reference build accepts (`REFERENCE_BUILD_LIMITS`).
+    accept_content(&payload, REFERENCE_BUILD_LIMITS).map_err(|error| err(0, describe(&error)))?;
 
     Ok(payload)
 }
@@ -488,7 +509,6 @@ mod tests {
     use super::*;
     use moonblokz_configuration::{
         ChainConfigTrait, ChainConfiguration, NoopConfigChangeSink, PARAMETER_COUNT,
-        SNAKE_CHAIN_LENGTH_MAX, UTXO_UNSPENT_BITS,
     };
     use moonblokz_crypto::SignatureTrait;
 
@@ -496,7 +516,7 @@ mod tests {
 
     fn loaded(source: &str) -> ChainConfiguration<NoopConfigChangeSink> {
         let payload = encode(source, KEY).expect("the fixture should encode");
-        let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+        let mut module = ChainConfiguration::new(NoopConfigChangeSink, REFERENCE_BUILD_LIMITS);
         module
             .load_tentative(&payload)
             .ok()
@@ -654,7 +674,10 @@ mod tests {
         // A structural bound: the tool must not emit content the network would
         // reject.
         let error = encode(
-            &format!("active_chain_length = {}\n", SNAKE_CHAIN_LENGTH_MAX + 1),
+            &format!(
+                "active_chain_length = {}\n",
+                REFERENCE_BUILD_LIMITS.snake_chain_length_max + 1
+            ),
             KEY,
         )
         .expect_err("over the compile-time capacity");
@@ -684,20 +707,26 @@ mod tests {
     fn max_block_utxo_output_encodes_across_the_widened_range() {
         // Two bytes wide so the whole spent-bit capacity is declarable; the tool
         // has to agree with the network at both ends of it.
-        let module = loaded(&format!("max_block_utxo_output = {UTXO_UNSPENT_BITS}\n"));
+        let module = loaded(&format!(
+            "max_block_utxo_output = {}\n",
+            REFERENCE_BUILD_LIMITS.utxo_unspent_bits
+        ));
         assert_eq!(
             module
                 .active_configuration()
                 .expect("handle")
                 .max_utxo_outputs(),
-            UTXO_UNSPENT_BITS
+            REFERENCE_BUILD_LIMITS.utxo_unspent_bits
         );
 
         // One above the capacity is a *structural bound*, not a width error — the
         // distinction the widening exists to make, and the diagnostic a founder
         // has to be able to tell apart from the one below.
         let error = encode(
-            &format!("max_block_utxo_output = {}\n", UTXO_UNSPENT_BITS as u32 + 1),
+            &format!(
+                "max_block_utxo_output = {}\n",
+                REFERENCE_BUILD_LIMITS.utxo_unspent_bits as u32 + 1
+            ),
             KEY,
         )
         .expect_err("over the spent-bit capacity");

@@ -34,6 +34,23 @@ enum Entry<'a> {
     Bytecode(u8, &'a [u8]),
 }
 
+/// The build every fixture in this file is written against.
+///
+/// A test that needs a differently sized node states its own `BuildLimits`; the
+/// wrapper below is what lets the rest say nothing about capacities at all.
+const TEST_LIMITS: BuildLimits = BuildLimits {
+    utxo_unspent_bits: 256,
+    snake_chain_length_max: 500,
+};
+
+const _: () = assert!(limits_are_expressible(TEST_LIMITS));
+
+/// [`super::accept_content`] against [`TEST_LIMITS`]. Shadows the glob import on
+/// purpose, so a fixture reads as the acceptance rule rather than as a build.
+fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
+    super::accept_content(payload, TEST_LIMITS)
+}
+
 fn test_crypto() -> Crypto {
     Crypto::new([1u8; PRIVATE_KEY_SIZE])
         .ok()
@@ -75,7 +92,7 @@ fn frame_raw(count: u16, body: &[u8]) -> Payload {
 
 fn loaded(entries: &[Entry<'_>]) -> ChainConfiguration<NoopConfigChangeSink> {
     let payload = frame(entries);
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     module
         .load_tentative(payload.as_slice())
         .expect("fixture content should be accepted");
@@ -184,7 +201,7 @@ fn every_default_satisfies_its_own_bound() {
 
 #[test]
 fn no_configuration_yields_no_handle() {
-    let module = ChainConfiguration::new(NoopConfigChangeSink);
+    let module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     assert!(module.active_configuration().is_none());
     assert!(module.tentative_content().is_none());
     assert!(module.durable_content().is_none());
@@ -616,7 +633,7 @@ fn the_unusable_key_bytes_are_malformed_framing() {
 
 #[test]
 fn a_payload_over_the_retention_buffer_is_refused() {
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     let oversized = [0u8; MAX_PAYLOAD_SIZE + 1];
     let error = module
         .load_tentative(&oversized)
@@ -759,13 +776,13 @@ fn block_size_limit_is_bounded_by_the_block_buffer() {
 fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
     let at_bound = frame(&[Entry::Literal(
         parameter::ACTIVE_CHAIN_LENGTH,
-        &SNAKE_CHAIN_LENGTH_MAX.to_le_bytes(),
+        &TEST_LIMITS.snake_chain_length_max.to_le_bytes(),
     )]);
     assert!(accept_content(at_bound.as_slice()).is_ok());
 
     let over = frame(&[Entry::Literal(
         parameter::ACTIVE_CHAIN_LENGTH,
-        &(SNAKE_CHAIN_LENGTH_MAX + 1).to_le_bytes(),
+        &(TEST_LIMITS.snake_chain_length_max + 1).to_le_bytes(),
     )]);
     assert!(matches!(
         accept_content(over.as_slice()),
@@ -801,12 +818,53 @@ fn max_utxo_outputs_reads_the_whole_capacity() {
     // where a `u8` left on the resolution path would saturate at 255 unnoticed.
     let module = loaded(&[Entry::Literal(
         parameter::MAX_BLOCK_UTXO_OUTPUT,
-        &UTXO_UNSPENT_BITS.to_le_bytes(),
+        &TEST_LIMITS.utxo_unspent_bits.to_le_bytes(),
     )]);
     let config = module
         .active_configuration()
         .expect("content is loaded, so a handle is available");
-    assert_eq!(config.max_utxo_outputs(), UTXO_UNSPENT_BITS);
+    assert_eq!(config.max_utxo_outputs(), TEST_LIMITS.utxo_unspent_bits);
+}
+
+#[test]
+fn a_smaller_build_refuses_what_the_reference_build_accepts() {
+    // The two capacities are the caller's, so the same content can be acceptable
+    // to one node and not to another — which is the point of the check rather
+    // than a flaw in it: a node that cannot represent the declared value has to
+    // reject the chain, not quietly resolve a different value than its neighbour.
+    // This is also the only test that exercises `BuildLimits` as a parameter
+    // rather than as the fixture's fixed reference.
+    let wide = frame(&[Entry::Literal(
+        parameter::MAX_BLOCK_UTXO_OUTPUT,
+        &200u16.to_le_bytes(),
+    )]);
+    assert!(super::accept_content(wide.as_slice(), TEST_LIMITS).is_ok());
+    let narrow_cache = BuildLimits {
+        utxo_unspent_bits: 128,
+        ..TEST_LIMITS
+    };
+    assert!(matches!(
+        super::accept_content(wide.as_slice(), narrow_cache),
+        Err(ChainConfigError::BoundViolation(
+            parameter::MAX_BLOCK_UTXO_OUTPUT
+        ))
+    ));
+
+    let long_window = frame(&[Entry::Literal(
+        parameter::ACTIVE_CHAIN_LENGTH,
+        &200u16.to_le_bytes(),
+    )]);
+    assert!(super::accept_content(long_window.as_slice(), TEST_LIMITS).is_ok());
+    let short_window = BuildLimits {
+        snake_chain_length_max: 100,
+        ..TEST_LIMITS
+    };
+    assert!(matches!(
+        super::accept_content(long_window.as_slice(), short_window),
+        Err(ChainConfigError::BoundViolation(
+            parameter::ACTIVE_CHAIN_LENGTH
+        ))
+    ));
 }
 
 #[test]
@@ -815,16 +873,23 @@ fn max_block_utxo_output_is_bounded_by_the_spent_bit_width() {
     // now representable, which is what makes the bound do work at all.
     let at_capacity = frame(&[Entry::Literal(
         parameter::MAX_BLOCK_UTXO_OUTPUT,
-        &UTXO_UNSPENT_BITS.to_le_bytes(),
+        &TEST_LIMITS.utxo_unspent_bits.to_le_bytes(),
     )]);
     assert!(accept_content(at_capacity.as_slice()).is_ok());
-    assert!(check_bound(parameter::MAX_BLOCK_UTXO_OUTPUT, UTXO_UNSPENT_BITS as u64).is_ok());
+    assert!(
+        check_build_limit(
+            parameter::MAX_BLOCK_UTXO_OUTPUT,
+            TEST_LIMITS.utxo_unspent_bits as u64,
+            TEST_LIMITS
+        )
+        .is_ok()
+    );
 
     // One above the capacity is rejected by the bound itself, not by the width
     // rule: this is the case a one-byte parameter could never express.
     let above = frame(&[Entry::Literal(
         parameter::MAX_BLOCK_UTXO_OUTPUT,
-        &(UTXO_UNSPENT_BITS + 1).to_le_bytes(),
+        &(TEST_LIMITS.utxo_unspent_bits + 1).to_le_bytes(),
     )]);
     assert!(matches!(
         accept_content(above.as_slice()),
@@ -833,9 +898,10 @@ fn max_block_utxo_output_is_bounded_by_the_spent_bit_width() {
         ))
     ));
     assert!(matches!(
-        check_bound(
+        check_build_limit(
             parameter::MAX_BLOCK_UTXO_OUTPUT,
-            UTXO_UNSPENT_BITS as u64 + 1
+            TEST_LIMITS.utxo_unspent_bits as u64 + 1,
+            TEST_LIMITS
         ),
         Err(ChainConfigError::BoundViolation(
             parameter::MAX_BLOCK_UTXO_OUTPUT
@@ -1182,7 +1248,7 @@ fn a_rejected_content_leaves_the_previous_state_untouched() {
     let good = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[9])]);
     let bad = frame(&[Entry::Literal(parameter::REQUIRED_SUPPORT, &[0])]);
 
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     module.load_tentative(good.as_slice()).expect("accepted");
     assert!(module.load_tentative(bad.as_slice()).is_err());
 
@@ -1197,7 +1263,7 @@ fn a_rejected_content_leaves_the_previous_state_untouched() {
 #[test]
 fn tentative_load_exposes_tentative_content_only() {
     let payload = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[6])]);
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     module.load_tentative(payload.as_slice()).expect("accepted");
 
     let content_len = payload.len - SIGNATURE_SIZE;
@@ -1216,7 +1282,7 @@ fn tentative_load_exposes_tentative_content_only() {
 #[test]
 fn promotion_flips_the_flag_over_the_same_bytes() {
     let payload = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[6])]);
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     module.load_tentative(payload.as_slice()).expect("accepted");
     let before = module.tentative_content().expect("tentative").len();
 
@@ -1242,7 +1308,7 @@ fn promotion_flips_the_flag_over_the_same_bytes() {
 #[test]
 fn a_second_promotion_is_refused() {
     let payload = frame(&[]);
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     module.load_tentative(payload.as_slice()).expect("accepted");
     module.promote_durable().expect("first promotion");
 
@@ -1255,7 +1321,7 @@ fn a_second_promotion_is_refused() {
 
 #[test]
 fn promotion_without_content_is_refused() {
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     assert!(matches!(
         module.promote_durable(),
         Err(ChainConfigError::NotLoaded)
@@ -1267,7 +1333,7 @@ fn a_load_after_the_durable_lock_is_refused() {
     let first = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[6])]);
     let second = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[7])]);
 
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     module.load_durable(first.as_slice()).expect("accepted");
 
     assert!(matches!(
@@ -1291,7 +1357,7 @@ fn a_load_after_the_durable_lock_is_refused() {
 #[test]
 fn discard_returns_the_module_to_absent() {
     let payload = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[6])]);
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     module.load_tentative(payload.as_slice()).expect("accepted");
 
     module.discard_tentative();
@@ -1316,7 +1382,7 @@ fn discard_returns_the_module_to_absent() {
 #[test]
 fn discard_never_drops_a_durable_configuration() {
     let payload = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[6])]);
-    let mut module = ChainConfiguration::new(NoopConfigChangeSink);
+    let mut module = ChainConfiguration::new(NoopConfigChangeSink, TEST_LIMITS);
     module.load_durable(payload.as_slice()).expect("accepted");
 
     module.discard_tentative();
@@ -1369,7 +1435,7 @@ fn the_sink_observes_exactly_the_state_transitions() {
     let replacement = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[2])]);
     let rejected = frame(&[Entry::Literal(parameter::REQUIRED_SUPPORT, &[0])]);
 
-    let mut module = ChainConfiguration::new(RecordingSink::new());
+    let mut module = ChainConfiguration::new(RecordingSink::new(), TEST_LIMITS);
 
     module.load_tentative(first.as_slice()).expect("accepted");
     // The FR8 mismatch path: a replacement tentative is a transition too.
@@ -1400,7 +1466,7 @@ fn discard_is_not_reported() {
     // There is no configuration to hand the sink after a discard, and the
     // adoption of the next tentative is the transition consumers act on.
     let payload = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[1])]);
-    let mut module = ChainConfiguration::new(RecordingSink::new());
+    let mut module = ChainConfiguration::new(RecordingSink::new(), TEST_LIMITS);
     module.load_tentative(payload.as_slice()).expect("accepted");
     module.discard_tentative();
 

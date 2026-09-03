@@ -51,47 +51,94 @@ use moonblokz_vm::{Fuel, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
 // Compile-time capacities
 // ---------------------------------------------------------------------------
 
-/// Per-block UTXO spent-bit width of the local build — the *capacity*, against
-/// which the chain-configured `max_block_utxo_output` is the actual value.
+/// The per-build capacities a chain's declared values must fit inside, as the
+/// **caller** states them.
 ///
-/// A chain declaring `max_block_utxo_output` above this cannot be represented by
-/// the local node's cache, so the acceptance pass rejects it (FR8).
+/// Two of §6's bound checks measure a chain-declared value against a capacity of
+/// the *local build*: the per-block UTXO spent-bit width and the active-chain
+/// window. Both are const generics of `moonblokz-blockchain`, which depends on
+/// this crate and not the reverse, so this crate cannot read them — and it does
+/// not copy them either. The caller that owns them passes them in once, at
+/// construction, which makes drift between the two sides **unrepresentable**
+/// rather than asserted. A third per-build ceiling needs no such treatment:
+/// `MAX_AGGREGATED_SIGNATURES` comes from `moonblokz-crypto`, which sits *below*
+/// this crate, so it is imported.
 ///
-/// One thing is **not** true yet, and saying so here is cheaper than letting a
-/// reader assume it: the blockchain will pin this constant to its real spent-bit
-/// width with a monomorphization-time assertion, but that lands in Story 5.8 —
-/// the blockchain does not depend on this crate until then, so nothing currently
-/// prevents the two from drifting.
+/// Both checks are reachable only from acceptance, and structurally so: they live
+/// in a separate acceptance-only check, which the resolution guard never calls. That is the
+/// safety rule of §6 — a bound whose limit is a per-build constant must never be
+/// enforced by fallback, because a node that cannot honour the declared value has
+/// to reject the chain rather than keep participating with a different value than
+/// a differently built node resolves.
 ///
-/// The bound itself is live. `max_block_utxo_output` is two bytes wide precisely
-/// so that it can be declared above this capacity and refused: while it was one
-/// byte a declared literal could not exceed 255, so against a 256-bit width the
-/// check could never fail and the top of the range was unreachable. The
-/// compile-time assertion beside `PER_BUILD_LIMITED_IDS` now pins that relation
-/// for every per-build ceiling, whatever the width.
-pub const UTXO_UNSPENT_BITS: u16 = 256;
+/// The caller should also pin, at compile time, that these capacities leave a
+/// violation *expressible* in each parameter's declared width — see
+/// [`limits_are_expressible`].
+#[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug))]
+pub struct BuildLimits {
+    /// Per-block UTXO spent-bit width of the local build.
+    ///
+    /// A chain declaring `max_block_utxo_output` above this cannot be represented
+    /// by the local node's cache, so the acceptance pass rejects it (FR8).
+    pub utxo_unspent_bits: u16,
 
-/// Compile-time active-chain capacity of the local build.
+    /// Compile-time active-chain capacity of the local build.
+    ///
+    /// The window length `W` is chain configuration — every node on a chain must
+    /// retain the same window or they do not agree on what has dropped out of it —
+    /// but a node cannot resize compile-time arrays from chain content. The
+    /// capacity is therefore what the chain's `W` must fit inside: a node whose
+    /// capacity is below the chain's `W` cannot participate and rejects the
+    /// configuration, and a node whose capacity exceeds it simply uses part of
+    /// what it allocated.
+    pub snake_chain_length_max: u16,
+}
+
+/// Whether `limits` leaves a bound violation expressible in the declared width of
+/// each parameter it bounds.
 ///
-/// The active-chain window length `W` is chain configuration — every node on a
-/// chain must retain the same window or they do not agree on what has dropped
-/// out of it — but a node cannot resize compile-time arrays from chain content.
-/// The const generic is therefore a *capacity* and the chain-configured `W` must
-/// fit inside it: a node whose capacity is below the chain's `W` cannot
-/// participate and rejects the configuration, and a node whose capacity exceeds
-/// it simply uses part of what it allocated.
+/// This is the relation a per-build bound rests on, and it is the caller's to pin
+/// because the caller owns the capacities while this crate owns the widths. If a
+/// capacity sits at the top of its parameter's width — or above it — then a value
+/// that violates the bound cannot be framed at all: the exact-width rule of §3.4
+/// refuses it before the bound is ever tested, the bound becomes
+/// unfalsifiable, and the top of the range is unreachable. That is precisely the
+/// state `max_block_utxo_output` was in while it was one byte wide against a
+/// 256-bit capacity.
 ///
-/// Not pinned to the blockchain yet, and for a longer reason than
-/// [`UTXO_UNSPENT_BITS`]: besides the missing dependency edge, the blockchain's
-/// own constant is still `SNAKE_CHAIN_LENGTH`, a window *length* rather than a
-/// capacity, so an assertion today would pin the wrong pair. **Story 5.11** owns
-/// this pin — it is the story that splits the capacity out and threads the
-/// chain-configured `W` — where 5.8 owns [`UTXO_UNSPENT_BITS`]'s.
-pub const SNAKE_CHAIN_LENGTH_MAX: u16 = 500;
+/// Assert it where the capacities are stated, so that widening a capacity or
+/// narrowing a width fails the build:
+///
+/// ```rust
+/// use moonblokz_configuration::{BuildLimits, limits_are_expressible};
+///
+/// const LIMITS: BuildLimits = BuildLimits {
+///     utxo_unspent_bits: 256,
+///     snake_chain_length_max: 500,
+/// };
+/// const _: () = assert!(limits_are_expressible(LIMITS));
+/// ```
+pub const fn limits_are_expressible(limits: BuildLimits) -> bool {
+    ceiling_fits(
+        parameter::MAX_BLOCK_UTXO_OUTPUT,
+        limits.utxo_unspent_bits as u64,
+    ) && ceiling_fits(
+        parameter::ACTIVE_CHAIN_LENGTH,
+        limits.snake_chain_length_max as u64,
+    )
+}
+
+/// Whether a value one above `ceiling` is representable in `id`'s declared width.
+const fn ceiling_fits(id: u8, ceiling: u64) -> bool {
+    // Widths are asserted `1..=8` below, so the shift cannot overflow.
+    let width_max = u64::MAX >> (64 - 8 * REGISTRY[id as usize - 1].width as u32);
+    ceiling < width_max
+}
 
 /// Declared width of the radio scoring matrix, the one array-typed parameter.
 ///
-/// Unlike [`UTXO_UNSPENT_BITS`] and [`SNAKE_CHAIN_LENGTH_MAX`] this is not a
+/// Unlike the two capacities in [`BuildLimits`] this is not a
 /// per-build capacity the chain's value must fit inside — it is the registry's
 /// own declared width, and so permanent wire format like every other width
 /// (specification §4.5 rule 2). It carries a name only because the accessor
@@ -184,7 +231,8 @@ pub mod parameter {
     /// Block-size limit. Literal-only: its bound is what keeps the limit inside
     /// the compile-time block buffer, and only a declared value is checkable.
     pub const BLOCK_SIZE_LIMIT: u8 = 3;
-    /// Maximum UTXO outputs per block, bounded by `UTXO_UNSPENT_BITS`.
+    /// Maximum UTXO outputs per block, bounded by the caller's
+    /// [`crate::BuildLimits::utxo_unspent_bits`].
     pub const MAX_BLOCK_UTXO_OUTPUT: u8 = 4;
     /// Maximum aggregated signatures per approval-evidence block (ADR-015).
     pub const MAX_AGGREGATED_SIGNATURES: u8 = 5;
@@ -225,7 +273,8 @@ pub mod parameter {
 
     /// FR45 (a) block fill threshold, percent.
     pub const BLOCK_FILL_THRESHOLD_PERCENT: u8 = 20;
-    /// Active-chain window length `W`, bounded by `SNAKE_CHAIN_LENGTH_MAX`.
+    /// Active-chain window length `W`, bounded by the caller's
+    /// [`crate::BuildLimits::snake_chain_length_max`].
     pub const ACTIVE_CHAIN_LENGTH: u8 = 21;
     /// FR56 mempool replenishment interval, milliseconds.
     pub const MEMPOOL_REPLENISHMENT_INTERVAL_MS: u8 = 22;
@@ -483,36 +532,13 @@ const _: () = {
     }
 };
 
-/// Whether a value one above `ceiling` is representable in `id`'s declared width.
-///
-/// This is the relation a per-build bound rests on. If the ceiling sits at the top
-/// of the width — or above it — then a value that violates the bound cannot be
-/// framed in the first place: the exact-width rule of §3.4 refuses it before
-/// [`check_bound`] ever sees it, the bound becomes unfalsifiable, and the top of
-/// the range is unreachable. That is precisely the state `max_block_utxo_output`
-/// was in while it was one byte wide against a 256-bit capacity.
-const fn a_violation_is_expressible(id: u8, ceiling: u64) -> bool {
-    // Widths are asserted `1..=8` above, so the shift cannot overflow.
-    let width_max = u64::MAX >> (64 - 8 * REGISTRY[id as usize - 1].width as u32);
-    ceiling < width_max
-}
-
-// Editing a declared width back down, or raising a capacity to the top of its
-// width, now fails the build instead of silently retiring the bound.
-const _: () = {
-    assert!(a_violation_is_expressible(
-        parameter::MAX_BLOCK_UTXO_OUTPUT,
-        UTXO_UNSPENT_BITS as u64
-    ));
-    assert!(a_violation_is_expressible(
-        parameter::MAX_AGGREGATED_SIGNATURES,
-        MAX_AGGREGATED_SIGNATURES as u64
-    ));
-    assert!(a_violation_is_expressible(
-        parameter::ACTIVE_CHAIN_LENGTH,
-        SNAKE_CHAIN_LENGTH_MAX as u64
-    ));
-};
+// `MAX_AGGREGATED_SIGNATURES` is the one per-build ceiling this crate can see, so
+// it is the one whose expressibility this crate can pin. The other two travel in
+// `BuildLimits` and are the caller's to pin, with `limits_are_expressible`.
+const _: () = assert!(ceiling_fits(
+    parameter::MAX_AGGREGATED_SIGNATURES,
+    MAX_AGGREGATED_SIGNATURES as u64
+));
 
 // A default travels the same path a chain-declared literal does, so it has to fit
 // the width the registry declares for it. Nothing pinned the two together, and the
@@ -758,17 +784,27 @@ pub struct ChainConfiguration<Sink: ConfigChangeSink> {
     /// `None` is the absent state; the buffer above is then simply unread.
     commitment: Option<Commitment>,
     sink: Sink,
+    /// The local build's capacities, as its owner stated them (§6). Four bytes,
+    /// held for the module's life because they are build facts rather than
+    /// per-load data — which is also why they sit on the constructor.
+    limits: BuildLimits,
 }
 
 impl<Sink: ConfigChangeSink> ChainConfiguration<Sink> {
     /// A module holding no configuration.
-    pub const fn new(sink: Sink) -> Self {
+    ///
+    /// `limits` states the local build's capacities for the two §6 checks this
+    /// crate cannot derive — see [`BuildLimits`]. They are taken here rather than
+    /// per load because they are properties of the build, not of the content, and
+    /// pinning them at construction leaves the load surface unchanged.
+    pub const fn new(sink: Sink, limits: BuildLimits) -> Self {
         Self {
             payload: [0u8; MAX_PAYLOAD_SIZE],
             payload_len: 0,
             content_len: 0,
             commitment: None,
             sink,
+            limits,
         }
     }
 
@@ -781,7 +817,7 @@ impl<Sink: ConfigChangeSink> ChainConfiguration<Sink> {
         // previous state exactly as it was. The retention bound is part of that
         // pass, not a separate check here, so `config-encoder`'s guarantee — what
         // the tool accepts, the network accepts — covers it too.
-        let content_len = accept_content(payload)?;
+        let content_len = accept_content(payload, self.limits)?;
 
         self.payload[..payload.len()].copy_from_slice(payload);
         self.payload_len = payload.len() as u16;
@@ -913,7 +949,7 @@ impl<'a> ActiveConfig<'a> {
     /// Maximum UTXO outputs per block.
     ///
     /// Two bytes wide, and `u16` on the way out, so that the whole capacity is
-    /// reachable: the ceiling is `UTXO_UNSPENT_BITS`, which a one-byte literal
+    /// reachable: the ceiling is the caller's spent-bit width, which a one-byte literal
     /// could never reach and never exceed — the bound was unfailable, and the
     /// top of the range unusable. The width also makes the FR8 check real work,
     /// because acceptance sees the raw declared value, where an out-of-range
@@ -980,7 +1016,8 @@ impl<'a> ActiveConfig<'a> {
         narrow_u8(self.resolve(parameter::BLOCK_FILL_THRESHOLD_PERCENT, &[]))
     }
 
-    /// Active-chain window length `W`, at most [`SNAKE_CHAIN_LENGTH_MAX`].
+    /// Active-chain window length `W`, at most the caller's
+    /// [`crate::BuildLimits::snake_chain_length_max`].
     pub fn active_chain_length(&self) -> u16 {
         narrow_u16(self.resolve(parameter::ACTIVE_CHAIN_LENGTH, &[]))
     }
@@ -1305,7 +1342,7 @@ fn narrow_u32(value: u64) -> u32 {
 /// code-baked default and then to the fallback literal, identically on every node
 /// (§7.3). The bounds that must hold for a node to *represent* the chain all sit on
 /// literal-only parameters and are therefore still checked below.
-pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
+pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, ChainConfigError> {
     // The retention buffer is fixed, so content this node could not hold is not
     // content it can accept. Checked here rather than at the load site so that the
     // public pass is the whole acceptance rule.
@@ -1367,6 +1404,11 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
         let declared = read_le(entry.value());
 
         check_bound(spec.id, declared)?;
+        // The two checks measured against a capacity of the local build. They are
+        // applied here and nowhere else: `bounded`, the resolution-time guard,
+        // cannot reach them, which is the §6 safety rule made structural rather
+        // than asserted.
+        check_build_limit(spec.id, declared, limits)?;
 
         match spec.id {
             parameter::TX_FEE_PER_BYTE_MIN => tx_fee_min = Some(declared),
@@ -1418,10 +1460,11 @@ pub fn accept_content(payload: &[u8]) -> Result<usize, ChainConfigError> {
 /// keeps the node participating with a *different value*, so if two builds
 /// disagreed about the bound they would disagree about the value, with no error on
 /// either side. Every bound reachable from here must therefore hold identically on
-/// every build. That is why `UTXO_UNSPENT_BITS` (ID 4) and `SNAKE_CHAIN_LENGTH_MAX`
-/// (ID 21) belong to literal-only parameters: their limits are per-build, so the
-/// decision has to stay at acceptance, where the answer is rejection rather than
-/// substitution. Every bound this function can reach is universal — 0, 1, 100, and
+/// every build. That is why the two parameters bounded by a [`BuildLimits`]
+/// capacity — IDs 4 and 21 — are literal-only: their limits are the caller's
+/// build's, so the decision has to stay at acceptance, where the answer is
+/// rejection rather than substitution. Their checks live in a separate
+/// acceptance-only function, so this one cannot reach them even by mistake. Every bound this function can reach is universal — 0, 1, 100, and
 /// the block format's own `HEADER_SIZE` and `MAX_BLOCK_SIZE`. ID 10's ceiling was
 /// the one exception and is no longer here: it became a clamp against the chain's
 /// own declared value instead (see [`ActiveConfig::required_support`]).
@@ -1432,20 +1475,23 @@ fn bounded(id: u8, value: u64) -> Option<u64> {
     }
 }
 
-/// The structural bounds, applied to a declared value.
+/// The bounds this crate can check on its own, applied to a declared value.
 ///
-/// Each is a place where the chain states a requirement and a compile-time
-/// constant states what this build can honour. A parameter with no bound passes.
+/// Each is a place where the chain states a requirement and a constant *this
+/// crate can see* states what may be honoured — a universal limit, or a ceiling
+/// imported from a crate below this one. Runs at acceptance on a declared literal
+/// and again at resolution on a computed value, with the same predicate, so a
+/// parameter bounded here may admit a program. A parameter with no bound passes.
+///
+/// The two ceilings that belong to the *caller's* build live in
+/// [`check_build_limit`] instead, which is what keeps them off the resolution
+/// path.
 fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
     let within = match id {
-        // FR8: above the local per-block spent-bit width the cache cannot
-        // represent the outputs; at zero no transaction output could ever be
-        // included. Both ends do work now that the parameter is two bytes wide: a
-        // declared value above the capacity is representable, so this check is
-        // what refuses it — including on a build whose cache is narrower than the
-        // chain demands. The compile-time assertion beside `PER_BUILD_LIMITED_IDS`
-        // keeps it that way.
-        parameter::MAX_BLOCK_UTXO_OUTPUT => declared >= 1 && declared <= UTXO_UNSPENT_BITS as u64,
+        // FR8: at zero no transaction output could ever be included in a block.
+        // Universal, so it lives here; the *ceiling* is the caller's build's and
+        // lives in `check_build_limit`.
+        parameter::MAX_BLOCK_UTXO_OUTPUT => declared >= 1,
         // FR8 / ADR-015: below 1, `m = min(2·required_support − 1, |A|)` yields
         // `m = -1`. Only the floor lives here, and deliberately so: it is universal,
         // so the resolution guard may enforce it on a computed value. The ceiling is
@@ -1474,16 +1520,46 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
         }
         // A percentage.
         parameter::BLOCK_FILL_THRESHOLD_PERCENT => declared <= 100,
-        // The compile-time active-chain capacity above; a window has to hold at
-        // least one block below.
-        parameter::ACTIVE_CHAIN_LENGTH => {
-            declared >= 1 && declared <= SNAKE_CHAIN_LENGTH_MAX as u64
-        }
+        // A window has to hold at least one block. The capacity above it is the
+        // caller's, so it lives in `check_build_limit`.
+        parameter::ACTIVE_CHAIN_LENGTH => declared >= 1,
         // The budget every evaluation is bounded by, and which acceptance itself
         // spends once per argument-less program. At zero every program silently
         // resolves to its default with no diagnostic anywhere; unbounded above, a
         // single content could hold the core for as long as it asked.
         parameter::VM_FUEL_LIMIT => declared >= 1 && declared <= VM_FUEL_LIMIT_MAX as u64,
+        _ => true,
+    };
+
+    if within {
+        Ok(())
+    } else {
+        Err(ChainConfigError::BoundViolation(id))
+    }
+}
+
+/// The two bounds measured against a capacity of the **caller's** build.
+///
+/// Separate from [`check_bound`] for a reason that is not tidiness: these are the
+/// checks §6 forbids enforcing by fallback, because a node that cannot honour a
+/// declared value must reject the chain rather than keep participating with a
+/// different value than a differently built node resolves. Living here — where
+/// only [`accept_content`] calls them — makes that structural. The resolution
+/// guard has no `BuildLimits` to hand and no way to reach these arms.
+///
+/// Both parameters are literal-only besides (`PER_BUILD_LIMITED_IDS`), so a
+/// computed value could never arrive at one in the first place.
+fn check_build_limit(id: u8, declared: u64, limits: BuildLimits) -> Result<(), ChainConfigError> {
+    let within = match id {
+        // FR8: above the local per-block spent-bit width the cache cannot
+        // represent the outputs. Both ends do work now that the parameter is two
+        // bytes wide — a declared value above the capacity is representable, so
+        // this is the check that refuses it, including on a build whose cache is
+        // narrower than the chain demands. `limits_are_expressible` is what keeps
+        // that true, and the caller asserts it.
+        parameter::MAX_BLOCK_UTXO_OUTPUT => declared <= limits.utxo_unspent_bits as u64,
+        // FR8: the chain's window must fit the capacity this build allocated.
+        parameter::ACTIVE_CHAIN_LENGTH => declared <= limits.snake_chain_length_max as u64,
         _ => true,
     };
 
