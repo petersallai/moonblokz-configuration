@@ -827,6 +827,43 @@ fn max_utxo_outputs_reads_the_whole_capacity() {
 }
 
 #[test]
+fn every_caller_limited_identifier_is_constrained() {
+    // The list that names the caller-supplied ceilings and the function that
+    // applies them must not drift apart, in either direction. An entry with no arm
+    // would leave a capacity silently unenforced at acceptance; an arm with no
+    // entry would leave the literal-only assertion — the one thing keeping a
+    // caller-supplied ceiling off the resolution path — not covering it.
+    //
+    // A capacity of zero makes any declared value a violation, so one case per
+    // entry is enough to prove an arm exists.
+    let none = BuildLimits {
+        utxo_unspent_bits: 0,
+        snake_chain_length_max: 0,
+    };
+    for id in CALLER_LIMITED_IDS {
+        assert!(
+            matches!(
+                check_build_limit(id, 1, none),
+                Err(ChainConfigError::BoundViolation(refused)) if refused == id
+            ),
+            "identifier {id} is in CALLER_LIMITED_IDS but check_build_limit does not constrain it"
+        );
+    }
+
+    // And the converse: nothing outside the list is constrained here, so an arm
+    // added without a list entry fails this too.
+    for id in 1..=PARAMETER_COUNT as u8 {
+        if CALLER_LIMITED_IDS.contains(&id) {
+            continue;
+        }
+        assert!(
+            check_build_limit(id, u64::MAX, none).is_ok(),
+            "identifier {id} is constrained by check_build_limit but is not in CALLER_LIMITED_IDS"
+        );
+    }
+}
+
+#[test]
 fn a_smaller_build_refuses_what_the_reference_build_accepts() {
     // The two capacities are the caller's, so the same content can be acceptable
     // to one node and not to another — which is the point of the check rather

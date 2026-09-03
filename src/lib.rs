@@ -532,6 +532,49 @@ const _: () = {
     }
 };
 
+/// The identifiers whose ceiling is a capacity the **caller** supplies, and which
+/// [`check_build_limit`] therefore constrains.
+///
+/// A subset of [`PER_BUILD_LIMITED_IDS`]: that list's third member,
+/// `max_aggregated_signatures`, is measured against a constant this crate imports
+/// rather than against a [`BuildLimits`] field, so its arm stays in [`check_bound`].
+///
+/// The point of naming the subset is that one list then drives both the checks and
+/// the assertions. The assertion below requires each entry to be literal-only — a
+/// caller-supplied ceiling must never be enforced by fallback (§6) — and the test
+/// `every_caller_limited_identifier_is_constrained` drives a case per entry through
+/// [`check_build_limit`] in both directions, so the list and the function cannot
+/// drift apart: an entry with no arm fails, and an arm with no entry fails.
+const CALLER_LIMITED_IDS: [u8; 2] = [
+    parameter::MAX_BLOCK_UTXO_OUTPUT,
+    parameter::ACTIVE_CHAIN_LENGTH,
+];
+
+const _: () = {
+    let mut index = 0;
+    while index < CALLER_LIMITED_IDS.len() {
+        let id = CALLER_LIMITED_IDS[index];
+        // Literal-only, for the reason `PER_BUILD_LIMITED_IDS` gives.
+        assert!(!REGISTRY[id as usize - 1].bytecode_allowed);
+        // And listed there too, so the category this crate documents stays whole
+        // when a caller-limited parameter is added.
+        assert!(is_per_build_limited(id));
+        index += 1;
+    }
+};
+
+/// Whether `id` appears in [`PER_BUILD_LIMITED_IDS`].
+const fn is_per_build_limited(id: u8) -> bool {
+    let mut index = 0;
+    while index < PER_BUILD_LIMITED_IDS.len() {
+        if PER_BUILD_LIMITED_IDS[index] == id {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 // `MAX_AGGREGATED_SIGNATURES` is the one per-build ceiling this crate can see, so
 // it is the one whose expressibility this crate can pin. The other two travel in
 // `BuildLimits` and are the caller's to pin, with `limits_are_expressible`.
