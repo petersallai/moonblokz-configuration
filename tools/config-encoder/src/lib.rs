@@ -488,7 +488,7 @@ mod tests {
     use super::*;
     use moonblokz_configuration::{
         ChainConfigTrait, ChainConfiguration, NoopConfigChangeSink, PARAMETER_COUNT,
-        SNAKE_CHAIN_LENGTH_MAX,
+        SNAKE_CHAIN_LENGTH_MAX, UTXO_UNSPENT_BITS,
     };
     use moonblokz_crypto::SignatureTrait;
 
@@ -678,6 +678,36 @@ mod tests {
             encode("vote_interest = {\n    DIV\n    RET\n}\n", KEY).is_ok(),
             "the tool applies the network's checks, and the network runs no program at acceptance"
         );
+    }
+
+    #[test]
+    fn max_block_utxo_output_encodes_across_the_widened_range() {
+        // Two bytes wide so the whole spent-bit capacity is declarable; the tool
+        // has to agree with the network at both ends of it.
+        let module = loaded(&format!("max_block_utxo_output = {UTXO_UNSPENT_BITS}\n"));
+        assert_eq!(
+            module
+                .active_configuration()
+                .expect("handle")
+                .max_utxo_outputs(),
+            UTXO_UNSPENT_BITS
+        );
+
+        // One above the capacity is a *structural bound*, not a width error — the
+        // distinction the widening exists to make, and the diagnostic a founder
+        // has to be able to tell apart from the one below.
+        let error = encode(
+            &format!("max_block_utxo_output = {}\n", UTXO_UNSPENT_BITS as u32 + 1),
+            KEY,
+        )
+        .expect_err("over the spent-bit capacity");
+        assert!(error.message.contains("structural bound"), "{error}");
+
+        // Above the declared width it is a width error again, caught before the
+        // bound ever runs.
+        let error = encode("max_block_utxo_output = 65536\n", KEY).expect_err("two bytes wide");
+        assert_eq!(error.line, 1);
+        assert!(error.message.contains("2-byte width"), "{error}");
     }
 
     #[test]

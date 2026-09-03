@@ -794,6 +794,22 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
 }
 
 #[test]
+fn max_utxo_outputs_reads_the_whole_capacity() {
+    // The point of the two-byte width, exercised through the accessor: a chain may
+    // declare the top of the spent-bit capacity and read it back unchanged. Every
+    // other test on this parameter goes through `accept_content` or `check_bound`,
+    // where a `u8` left on the resolution path would saturate at 255 unnoticed.
+    let module = loaded(&[Entry::Literal(
+        parameter::MAX_BLOCK_UTXO_OUTPUT,
+        &UTXO_UNSPENT_BITS.to_le_bytes(),
+    )]);
+    let config = module
+        .active_configuration()
+        .expect("content is loaded, so a handle is available");
+    assert_eq!(config.max_utxo_outputs(), UTXO_UNSPENT_BITS);
+}
+
+#[test]
 fn max_block_utxo_output_is_bounded_by_the_spent_bit_width() {
     // Two bytes wide, so the whole capacity is declarable — and exceeding it is
     // now representable, which is what makes the bound do work at all.

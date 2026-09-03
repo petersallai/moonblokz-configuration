@@ -65,8 +65,10 @@ use moonblokz_vm::{Fuel, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
 ///
 /// The bound itself is live. `max_block_utxo_output` is two bytes wide precisely
 /// so that it can be declared above this capacity and refused: while it was one
-/// byte, a declared literal could not exceed 255, the check could not fail, and
-/// the top of the range was unreachable.
+/// byte a declared literal could not exceed 255, so against a 256-bit width the
+/// check could never fail and the top of the range was unreachable. The
+/// compile-time assertion beside `PER_BUILD_LIMITED_IDS` now pins that relation
+/// for every per-build ceiling, whatever the width.
 pub const UTXO_UNSPENT_BITS: u16 = 256;
 
 /// Compile-time active-chain capacity of the local build.
@@ -77,11 +79,31 @@ pub const UTXO_UNSPENT_BITS: u16 = 256;
 /// The const generic is therefore a *capacity* and the chain-configured `W` must
 /// fit inside it: a node whose capacity is below the chain's `W` cannot
 /// participate and rejects the configuration, and a node whose capacity exceeds
-/// it simply uses part of what it allocated. Pinned to the blockchain's own
-/// bound by an assertion there, like [`UTXO_UNSPENT_BITS`].
+/// it simply uses part of what it allocated.
+///
+/// Not pinned to the blockchain yet, and for a longer reason than
+/// [`UTXO_UNSPENT_BITS`]: besides the missing dependency edge, the blockchain's
+/// own constant is still `SNAKE_CHAIN_LENGTH`, a window *length* rather than a
+/// capacity, so an assertion today would pin the wrong pair. **Story 5.11** owns
+/// this pin — it is the story that splits the capacity out and threads the
+/// chain-configured `W` — where 5.8 owns [`UTXO_UNSPENT_BITS`]'s.
 pub const SNAKE_CHAIN_LENGTH_MAX: u16 = 500;
 
-/// Length of the radio scoring matrix, the one array-typed parameter.
+/// Declared width of the radio scoring matrix, the one array-typed parameter.
+///
+/// Unlike [`UTXO_UNSPENT_BITS`] and [`SNAKE_CHAIN_LENGTH_MAX`] this is not a
+/// per-build capacity the chain's value must fit inside — it is the registry's
+/// own declared width, and so permanent wire format like every other width
+/// (specification §4.5 rule 2). It carries a name only because the accessor
+/// returns an array and a length has to be nameable.
+///
+/// The *layout* behind those bytes is not this crate's: it belongs to
+/// `moonblokz_radio_lib::ScoringMatrix::new_from_encoded`, which names the same
+/// length as `SCORING_MATRIX_ENCODED_LEN`. Nothing pins the two, and nothing
+/// needs to: the node runtime's snapshot code hands this accessor's array to
+/// that function, so a disagreement is a compile error there rather than a
+/// silent misread. The layout is as permanent as the width — changing it needs a
+/// new identifier, not a new width (specification §4.2).
 pub const SCORING_MATRIX_LEN: usize = 5;
 
 /// Ceiling on the chain-declared `vm_fuel_limit`, **equal to the code-baked
@@ -398,8 +420,9 @@ const _: () = {
     while index < REGISTRY.len() {
         assert!(REGISTRY[index].id as usize == index + 1);
         // Every value is carried through a `u64`, which bounds the widths the
-        // registry may declare.
-        assert!(REGISTRY[index].width as usize <= 8);
+        // registry may declare. A width of zero would admit no value at all, and
+        // would make the shift in `ceiling_is_expressible` overflow.
+        assert!(REGISTRY[index].width >= 1 && REGISTRY[index].width as usize <= 8);
         index += 1;
     }
 };
@@ -460,6 +483,54 @@ const _: () = {
     }
 };
 
+/// Whether a value one above `ceiling` is representable in `id`'s declared width.
+///
+/// This is the relation a per-build bound rests on. If the ceiling sits at the top
+/// of the width — or above it — then a value that violates the bound cannot be
+/// framed in the first place: the exact-width rule of §3.4 refuses it before
+/// [`check_bound`] ever sees it, the bound becomes unfalsifiable, and the top of
+/// the range is unreachable. That is precisely the state `max_block_utxo_output`
+/// was in while it was one byte wide against a 256-bit capacity.
+const fn a_violation_is_expressible(id: u8, ceiling: u64) -> bool {
+    // Widths are asserted `1..=8` above, so the shift cannot overflow.
+    let width_max = u64::MAX >> (64 - 8 * REGISTRY[id as usize - 1].width as u32);
+    ceiling < width_max
+}
+
+// Editing a declared width back down, or raising a capacity to the top of its
+// width, now fails the build instead of silently retiring the bound.
+const _: () = {
+    assert!(a_violation_is_expressible(
+        parameter::MAX_BLOCK_UTXO_OUTPUT,
+        UTXO_UNSPENT_BITS as u64
+    ));
+    assert!(a_violation_is_expressible(
+        parameter::MAX_AGGREGATED_SIGNATURES,
+        MAX_AGGREGATED_SIGNATURES as u64
+    ));
+    assert!(a_violation_is_expressible(
+        parameter::ACTIVE_CHAIN_LENGTH,
+        SNAKE_CHAIN_LENGTH_MAX as u64
+    ));
+};
+
+// A default travels the same path a chain-declared literal does, so it has to fit
+// the width the registry declares for it. Nothing pinned the two together, and the
+// widening of `max_block_utxo_output` is exactly the edit where a width and a
+// literal beside it could have drifted apart.
+const _: () = {
+    let mut index = 0;
+    while index < REGISTRY.len() {
+        let width_max = u64::MAX >> (64 - 8 * REGISTRY[index].width as u32);
+        assert!(REGISTRY[index].fallback <= width_max);
+        match &REGISTRY[index].default {
+            DefaultValue::Literal(value) => assert!(*value <= width_max),
+            DefaultValue::Program(_) => (),
+        }
+        index += 1;
+    }
+};
+
 /// The radio runtime-tuning identifiers, 11 through 19.
 ///
 /// These are **literal-only by rule**, and argument-less by rule (§10.2). The radio
@@ -498,7 +569,7 @@ const _: () = {
 // nothing else in the crate would notice. The match also pins §4.3's rule that the
 // execution budget is a literal — resolving it must not require running a program.
 const _: () = match &REGISTRY[parameter::VM_FUEL_LIMIT as usize - 1].default {
-    DefaultValue::Literal(value) => assert!(*value <= VM_FUEL_LIMIT_MAX as u64),
+    DefaultValue::Literal(value) => assert!(*value == VM_FUEL_LIMIT_MAX as u64),
     DefaultValue::Program(_) => panic!("the execution budget must be a literal"),
 };
 
@@ -1369,9 +1440,11 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
     let within = match id {
         // FR8: above the local per-block spent-bit width the cache cannot
         // represent the outputs; at zero no transaction output could ever be
-        // included. The upper end is unreachable through a legal literal while the
-        // width is one byte — a wider value fails the exact-width rule first — but
-        // it is the pin that catches a build with a narrower cache.
+        // included. Both ends do work now that the parameter is two bytes wide: a
+        // declared value above the capacity is representable, so this check is
+        // what refuses it — including on a build whose cache is narrower than the
+        // chain demands. The compile-time assertion beside `PER_BUILD_LIMITED_IDS`
+        // keeps it that way.
         parameter::MAX_BLOCK_UTXO_OUTPUT => declared >= 1 && declared <= UTXO_UNSPENT_BITS as u64,
         // FR8 / ADR-015: below 1, `m = min(2·required_support − 1, |A|)` yields
         // `m = -1`. Only the floor lives here, and deliberately so: it is universal,
