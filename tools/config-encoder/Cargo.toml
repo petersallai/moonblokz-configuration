@@ -1,0 +1,26 @@
+[package]
+name = "moonblokz-config-encoder"
+version = "0.1.0"
+edition = "2024"
+description = "Host-side encoder for MoonBlokz chain-configuration content — parameter overrides to signed configuration content."
+license = "MIT"
+repository = "https://github.com/petersallai/moonblokz-configuration"
+
+[lib]
+name = "moonblokz_config_encoder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "config-encoder"
+path = "src/main.rs"
+
+[dependencies]
+# A host tool is a leaf, so the backend is pinned here rather than forwarded: the
+# tool must sign with the same backend the chain runs, and every crate in the
+# graph has to agree on one. `moonblokz-crypto`'s own default is a *different*
+# backend, so `default-features = false` is load-bearing — enabling two backends
+# does not build.
+moonblokz-configuration = { path = "../..", default-features = false, features = ["schnorr-crypto-bigint"] }
+moonblokz-chain-types = { path = "../../../moonblokz-chain-types", default-features = false, features = ["schnorr-crypto-bigint"] }
+moonblokz-crypto = { path = "../../../moonblokz-crypto-lib", default-features = false, features = ["schnorr-crypto-bigint"] }
+moonblokz-vm-asm = { path = "../../../moonblokz-vm/tools/vm-asm", default-features = false }
