@@ -989,7 +989,15 @@ impl<'a> ActiveConfig<'a> {
         narrow_u16(self.resolve(parameter::BLOCK_SIZE_LIMIT, &[]))
     }
 
-    /// Maximum UTXO outputs per block.
+    /// Maximum UTXO outputs per block — the **chain's declared value**.
+    ///
+    /// Three same-cased names meet at this parameter and mean different things.
+    /// This accessor returns the chain's value; [`BuildLimits::utxo_unspent_bits`]
+    /// is the *local build's capacity*, which the chain's value must fit inside
+    /// (the blockchain states it as its per-block spent-bit width); and
+    /// [`parameter::MAX_BLOCK_UTXO_OUTPUT`] is the *parameter identifier* that
+    /// names the value on the wire. A doc that lets the first two blur is how
+    /// the one-byte accessor survived as long as it did.
     ///
     /// Two bytes wide, and `u16` on the way out, so that the whole capacity is
     /// reachable: the ceiling is the caller's spent-bit width, which a one-byte literal
