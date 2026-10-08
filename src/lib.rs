@@ -559,6 +559,12 @@ const _: () = {
         // And listed there too, so the category this crate documents stays whole
         // when a caller-limited parameter is added.
         assert!(is_per_build_limited(id));
+        // A literal default, so the fallback acceptance measures for an absent
+        // entry is the value resolution will return for it.
+        assert!(matches!(
+            REGISTRY[id as usize - 1].default,
+            DefaultValue::Literal(_)
+        ));
         index += 1;
     }
 };
@@ -1446,6 +1452,8 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
     // consensus split and not a representation failure.
     let mut tx_fee_min = None;
     let mut tx_fee_max = None;
+    // Bit `i` is set when the content declares `CALLER_LIMITED_IDS[i]`.
+    let mut caller_limited_declared = 0u8;
 
     for entry in view.iter() {
         if entry.is_bytecode() {
@@ -1460,11 +1468,27 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
         // cannot reach them, which is the §6 safety rule made structural rather
         // than asserted.
         check_build_limit(spec.id, declared, limits)?;
+        if let Some(index) = CALLER_LIMITED_IDS.iter().position(|&id| id == spec.id) {
+            caller_limited_declared |= 1 << index;
+        }
 
         match spec.id {
             parameter::TX_FEE_PER_BYTE_MIN => tx_fee_min = Some(declared),
             parameter::TX_FEE_PER_BYTE_MAX => tx_fee_max = Some(declared),
             _ => {}
+        }
+    }
+
+    // A capacity bound holds for the value the chain will *resolve*, not only for
+    // the one it writes down. A content that omits a caller-limited parameter
+    // resolves it to its code-baked default, so that default is measured against
+    // this build exactly as a declared literal would be: a build whose capacity is
+    // below the default cannot represent the chain any more than if the founder
+    // had written the default out. The parameters are literal-only, so "not
+    // declared as a literal" is "absent".
+    for (index, &id) in CALLER_LIMITED_IDS.iter().enumerate() {
+        if caller_limited_declared & (1 << index) == 0 {
+            check_build_limit(id, spec(id).fallback, limits)?;
         }
     }
 

@@ -905,6 +905,48 @@ fn a_smaller_build_refuses_what_the_reference_build_accepts() {
 }
 
 #[test]
+fn an_absent_capacity_parameter_is_measured_by_its_default() {
+    // Omitting a caller-limited parameter does not exempt it: the chain resolves
+    // the code-baked default, so a build that cannot hold the default cannot hold
+    // the chain. Checked on both capacities, each one below its default in turn.
+    let empty = frame(&[]);
+    assert!(super::accept_content(empty.as_slice(), TEST_LIMITS).is_ok());
+
+    let short_window = BuildLimits {
+        snake_chain_length_max: 499,
+        ..TEST_LIMITS
+    };
+    assert!(matches!(
+        super::accept_content(empty.as_slice(), short_window),
+        Err(ChainConfigError::BoundViolation(
+            parameter::ACTIVE_CHAIN_LENGTH
+        ))
+    ));
+    let narrow_cache = BuildLimits {
+        utxo_unspent_bits: 254,
+        ..TEST_LIMITS
+    };
+    assert!(matches!(
+        super::accept_content(empty.as_slice(), narrow_cache),
+        Err(ChainConfigError::BoundViolation(
+            parameter::MAX_BLOCK_UTXO_OUTPUT
+        ))
+    ));
+
+    // Declaring a value the build can hold is what such a build needs, and the
+    // default it replaces is then not measured at all.
+    let fits_both = frame(&[
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &499u16.to_le_bytes()),
+        Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &254u16.to_le_bytes()),
+    ]);
+    let small_build = BuildLimits {
+        utxo_unspent_bits: 254,
+        snake_chain_length_max: 499,
+    };
+    assert!(super::accept_content(fits_both.as_slice(), small_build).is_ok());
+}
+
+#[test]
 fn max_block_utxo_output_is_bounded_by_the_spent_bit_width() {
     // Two bytes wide, so the whole capacity is declarable — and exceeding it is
     // now representable, which is what makes the bound do work at all.
