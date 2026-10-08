@@ -551,6 +551,10 @@ const CALLER_LIMITED_IDS: [u8; 2] = [
 ];
 
 const _: () = {
+    // `accept_content` records which of these a content declares in one bit
+    // each of a `u8`.
+    assert!(CALLER_LIMITED_IDS.len() <= u8::BITS as usize);
+
     let mut index = 0;
     while index < CALLER_LIMITED_IDS.len() {
         let id = CALLER_LIMITED_IDS[index];
@@ -559,12 +563,14 @@ const _: () = {
         // And listed there too, so the category this crate documents stays whole
         // when a caller-limited parameter is added.
         assert!(is_per_build_limited(id));
-        // A literal default, so the fallback acceptance measures for an absent
-        // entry is the value resolution will return for it.
-        assert!(matches!(
-            REGISTRY[id as usize - 1].default,
-            DefaultValue::Literal(_)
-        ));
+        // A literal default equal to the fallback, so the fallback acceptance
+        // measures for an absent entry is exactly the value resolution returns.
+        match &REGISTRY[id as usize - 1].default {
+            DefaultValue::Literal(value) => assert!(*value == REGISTRY[id as usize - 1].fallback),
+            DefaultValue::Program(_) => {
+                panic!("a caller-limited parameter needs a literal default")
+            }
+        }
         index += 1;
     }
 };

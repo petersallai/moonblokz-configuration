@@ -922,6 +922,13 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
             parameter::ACTIVE_CHAIN_LENGTH
         ))
     ));
+    // A capacity exactly at a default holds it.
+    let at_defaults = BuildLimits {
+        utxo_unspent_bits: 255,
+        snake_chain_length_max: 500,
+    };
+    assert!(super::accept_content(empty.as_slice(), at_defaults).is_ok());
+
     let narrow_cache = BuildLimits {
         utxo_unspent_bits: 254,
         ..TEST_LIMITS
