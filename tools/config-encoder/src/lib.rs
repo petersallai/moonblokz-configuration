@@ -353,7 +353,9 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
 }
 
 /// Refuses a `GETCONFIG` or `GETCHAININFO` whose identifier is unallocated or
-/// whose declared argument count contradicts its registry.
+/// whose declared argument count the host would decline — any count for a
+/// parameter, which takes none, and anything but the chain-info arity — and an
+/// `ARG`, which in a parameter program always traps.
 ///
 /// The host seam would decline such a call at runtime and the parameter would
 /// silently fall back to its default; catching it here is what turns that into a
@@ -369,6 +371,12 @@ fn check_host_call_arity(line_no: usize, line: &str) -> Result<(), EncodeError> 
     let Some(mnemonic) = tokens.next() else {
         return Ok(());
     };
+    if mnemonic.eq_ignore_ascii_case("ARG") {
+        return Err(err(
+            line_no,
+            "ARG: parameters take no arguments; read chain-info with GETCHAININFO instead",
+        ));
+    }
     let chain_info = mnemonic.eq_ignore_ascii_case("GETCHAININFO");
     if !chain_info && !mnemonic.eq_ignore_ascii_case("GETCONFIG") {
         return Ok(());
@@ -409,12 +417,16 @@ fn check_host_call_arity(line_no: usize, line: &str) -> Result<(), EncodeError> 
         ));
     };
     if argc != arity as u64 {
-        return Err(err(
-            line_no,
+        let message = if chain_info {
             format!(
                 "{name} declares {argc} argument(s) for identifier {id}, but the {space} records arity {arity}"
-            ),
-        ));
+            )
+        } else {
+            format!(
+                "{name} declares {argc} argument(s) for identifier {id}, but parameters take no arguments"
+            )
+        };
+        return Err(err(line_no, message));
     }
     Ok(())
 }
@@ -698,6 +710,15 @@ mod tests {
     }
 
     #[test]
+    fn an_arg_in_a_parameter_program_is_refused() {
+        // Parameters take no arguments, so `ARG` would trap on every node.
+        let error = encode("registration_price = {\n    top: arg 0\n    RET\n}\n", KEY)
+            .expect_err("ARG always traps");
+        assert_eq!(error.line, 2);
+        assert!(error.message.contains("parameters take no arguments"));
+    }
+
+    #[test]
     fn a_parameter_name_on_a_getchaininfo_line_is_refused() {
         // `@inter_block_interval_ms` is parameter 1; read as chain-info it would
         // silently be the registered-node count.
@@ -718,7 +739,7 @@ mod tests {
         )
         .expect_err("identifier 1 is argument-less");
         assert_eq!(error.line, 2);
-        assert!(error.message.contains("arity 0"));
+        assert!(error.message.contains("parameters take no arguments"));
     }
 
     #[test]
@@ -826,7 +847,7 @@ mod tests {
         )
         .expect_err("identifier 1 is argument-less");
         assert_eq!(error.line, 2);
-        assert!(error.message.contains("arity 0"));
+        assert!(error.message.contains("parameters take no arguments"));
     }
 
     #[test]

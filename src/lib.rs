@@ -5,7 +5,7 @@ divergence in these values is a divergence in validation outcome. This crate
 owns that agreement. It decodes the configuration content carried by chain-config
 blocks (`payload_type = 3`), holds the FR8 tentative/durable commitment state,
 resolves every parameter through a fixed registry of code-baked defaults, and
-evaluates the small programs that compute the computed ones. The
+evaluates the small programs a chain may override a parameter with. The
 blockchain consumes the result through per-parameter accessors and never
 interprets a configuration key itself (FR56).
 
@@ -1307,8 +1307,8 @@ impl<'a> ActiveConfig<'a> {
 impl VmHost for ActiveConfig<'_> {
     fn call(&self, func_id: u16, selector: u8, args: &[u64], fuel: &mut Fuel) -> Option<u64> {
         if func_id == HOST_READ_CHAIN_INFO {
-            // As for parameters, the declared count must match the registry's
-            // arity — the VM passes what the program claims and checks nothing.
+            // The declared count must match the chain-info registry's arity —
+            // the VM passes what the program claims and checks nothing.
             if args.len() != chain_info_arity(selector)? as usize {
                 return None;
             }

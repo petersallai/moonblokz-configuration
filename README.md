@@ -16,9 +16,11 @@ let mut module = ChainConfiguration::new(NoopConfigChangeSink);
 module.load_tentative(chain_config_block.payload())?;   // accepts, then notifies
 
 if let Some(config) = module.active_configuration() {
+    // No arguments: a program reads chain-info from the source bound here, and
+    // falls back to the default where the caller binds none.
+    let config = config.with_chain_info(&source);
     let interval = config.inter_block_interval_ms();
-    let price = config.registration_price();             // no arguments: inputs are the program's
-    let bound = config.with_chain_info(&source);          // chain-info for GETCHAININFO reads
+    let price = config.registration_price();
 }
 
 module.promote_durable()?;                               // set-once, FR8
@@ -37,7 +39,7 @@ module.promote_durable()?;                               // set-once, FR8
 - **Unknown keys are rejected, not skipped.** A node substituting its own default for a parameter it does not know would validate against different values than the rest of the network — a consensus split that produces no error anywhere. The consequence is deliberate: a chain's configuration content defines the minimum firmware capability required to participate, and a node older than a key the chain uses stays in collecting state. The rejection is distinguishable (`chain-config-unknown-key`, carrying the key byte) so the diagnosis reads *the node is out of date*.
 - **Narrowing is by saturation**, consistent with the VM's arithmetic. A parameter whose bound must hold for this node to *represent* the chain is not left to saturation: it is literal-only, so acceptance checks its declared value.
 - **Acceptance runs no program.** A program may read chain-info, which no acceptance-time context can supply, so such a pass would be partial by construction. A misbehaving program is covered completely by the resolution model instead — trap or exhausted budget, tier fails, fall through to the default and then the fallback literal, identically on every node. One total mechanism, not a partial one in front of it.
-- **The execution budget is downward-only.** A chain may declare a `vm_fuel_limit` at or below the code-baked default, never above it: the default is the one value grounded in a timing estimate, so a higher ceiling would be a bound no measurement supports. Acceptance also checks the declared limit before any other bound.
+- **The execution budget is downward-only.** A chain may declare a `vm_fuel_limit` at or below the code-baked default, never above it: the default is the one value grounded in a timing estimate, so a higher ceiling would be a bound no measurement supports.
 - **The registry is permanent wire format.** Identifiers are allocated densely from 1 and are never reused or renumbered: FR7 requires the content signature to be invariant for the chain's lifetime and reproduced byte-identically in every FR49 replay block. **So are the defaults**, for a less obvious reason: a chain that omits a parameter validates against this build's default for it, so two firmware versions whose default tables differ by one value validate the same chain differently, with no error on either side. Changing a default is a consensus-breaking change, not a tuning decision.
 
 ## What is deliberately not here
@@ -56,7 +58,7 @@ The registry is permanent wire format, so an addition is examined against a chec
 3. **No parameter takes arguments.** A chain-derived input is read through chain-info, so which inputs a value depends on is the program's decision, not the accessor's.
 4. **A relation between two parameters is not this module's to enforce.** Acceptance may check it on declared literals as a founder-facing diagnostic, but the consumer resolves an inconsistent pair at the point of use, deterministically; the module must not clamp one to the other, because choosing which value wins is the consumer's decision.
 
-Four of these are compile-time assertions, so the build catches a table edit that breaks them.
+Several of the specification's §4.5 rules are compile-time assertions, so the build catches a table edit that breaks them.
 
 ## Tooling
 

@@ -269,10 +269,10 @@ fn nested_resolution_sees_the_referenced_parameter_default() {
 }
 
 #[test]
-fn a_declared_argument_count_that_contradicts_the_registry_is_declined() {
-    // `GETCONFIG 1, 1` declares one argument for an argument-less parameter. The
-    // host owns the registry, so the host is where the disagreement is caught;
-    // it reaches the program as a failed call and the tier falls through.
+fn a_getconfig_declaring_an_argument_is_declined() {
+    // `GETCONFIG 1, 1` declares one argument, and parameters take none. The host
+    // is where that is caught; it reaches the program as a failed call and the
+    // tier falls through.
     let program = [
         op::PUSH_U8,
         0,
@@ -281,8 +281,6 @@ fn a_declared_argument_count_that_contradicts_the_registry_is_declined() {
         1,
         op::RET,
     ];
-    // Parameters take no arguments, so the host declines a `GETCONFIG` that
-    // declares one and the tier falls through at runtime.
     let module = loaded(&[Entry::Bytecode(parameter::REGISTRATION_PRICE, &program)]);
     let config = module.active_configuration().expect("handle");
 
@@ -1064,8 +1062,8 @@ fn the_fuel_limit_is_bounded_at_both_ends() {
     )]);
     assert!(accept_content(at_bound.as_slice()).is_ok());
 
-    // Unbounded above, one content could hold the core for as long as it asked —
-    // acceptance pays the limit once per argument-less program.
+    // Unbounded above, one evaluation could hold the core for as long as the
+    // content asked.
     let over = frame(&[Entry::Literal(
         parameter::VM_FUEL_LIMIT,
         &(VM_FUEL_LIMIT_MAX + 1).to_le_bytes(),
