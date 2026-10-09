@@ -56,7 +56,7 @@ The registry is permanent wire format, so an addition is examined against a chec
 3. **No parameter takes arguments.** A chain-derived input is read through chain-info, so which inputs a value depends on is the program's decision, not the accessor's.
 4. **A relation between two parameters is not this module's to enforce.** Acceptance may check it on declared literals as a founder-facing diagnostic, but the consumer resolves an inconsistent pair at the point of use, deterministically; the module must not clamp one to the other, because choosing which value wins is the consumer's decision.
 
-Three of these are compile-time assertions, so the build catches a table edit that breaks them.
+Four of these are compile-time assertions, so the build catches a table edit that breaks them.
 
 ## Tooling
 
