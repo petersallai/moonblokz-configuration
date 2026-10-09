@@ -315,6 +315,20 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
         let comment = &raw[code.len()..];
         let mut rest = code;
 
+        // `@name` names a *parameter*. On a `GETCHAININFO` line it would be
+        // rewritten into a parameter identifier and then read as a chain-info
+        // identifier of the same number — a different space, silently.
+        let is_chain_info = strip_label(code.trim())
+            .split_whitespace()
+            .next()
+            .is_some_and(|mnemonic| mnemonic.eq_ignore_ascii_case("GETCHAININFO"));
+        if is_chain_info && code.contains('@') {
+            return Err(err(
+                line_no,
+                "GETCHAININFO takes a chain-info identifier; `@name` names a configuration parameter",
+            ));
+        }
+
         while let Some(at) = rest.find('@') {
             line.push_str(&rest[..at]);
             let after = &rest[at + 1..];
@@ -680,6 +694,19 @@ mod tests {
         .expect_err("wrong arity");
         assert_eq!(error.line, 2);
         assert!(error.message.contains("records arity 0"));
+    }
+
+    #[test]
+    fn a_parameter_name_on_a_getchaininfo_line_is_refused() {
+        // `@inter_block_interval_ms` is parameter 1; read as chain-info it would
+        // silently be the registered-node count.
+        let error = encode(
+            "vote_interest = {\n    top: getchaininfo @inter_block_interval_ms, 0\n    RET\n}\n",
+            KEY,
+        )
+        .expect_err("@ names a parameter");
+        assert_eq!(error.line, 2);
+        assert!(error.message.contains("names a configuration parameter"));
     }
 
     #[test]

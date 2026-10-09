@@ -1562,7 +1562,6 @@ fn discard_is_not_reported() {
 // -- Chain-info (Story 5.12) --
 
 /// A chain-info source answering the registered-node count with a fixed value.
-#[derive(Clone, Copy)]
 struct FixedNodeCount(u64);
 
 impl ChainInfoSource for FixedNodeCount {
@@ -1593,7 +1592,7 @@ fn a_program_reads_the_bound_chain_info_source() {
         &PER_NODE_SECOND,
     )]);
     let config = module.active_configuration().expect("content is loaded");
-    let bound = config.with_chain_info(FixedNodeCount(12));
+    let bound = config.with_chain_info(&FixedNodeCount(12));
     assert_eq!(bound.parent_recovery_min_emit_interval_ms(), 12_000);
 }
 
@@ -1627,7 +1626,7 @@ fn a_chain_info_read_with_the_wrong_argument_count_is_declined() {
         &program,
     )]);
     let config = module.active_configuration().expect("content is loaded");
-    let bound = config.with_chain_info(FixedNodeCount(12));
+    let bound = config.with_chain_info(&FixedNodeCount(12));
     assert_eq!(bound.parent_recovery_min_emit_interval_ms(), 10_000);
 }
 
@@ -1640,7 +1639,7 @@ fn an_unallocated_chain_info_identifier_is_declined() {
             &program,
         )]);
         let config = module.active_configuration().expect("content is loaded");
-        let bound = config.with_chain_info(FixedNodeCount(12));
+        let bound = config.with_chain_info(&FixedNodeCount(12));
         assert_eq!(
             bound.parent_recovery_min_emit_interval_ms(),
             10_000,
@@ -1674,7 +1673,7 @@ fn getconfig_and_getchaininfo_mix_and_the_source_reaches_nested_evaluations() {
         ),
     ]);
     let config = module.active_configuration().expect("content is loaded");
-    let bound = config.with_chain_info(FixedNodeCount(3));
+    let bound = config.with_chain_info(&FixedNodeCount(3));
     assert_eq!(
         bound.parent_recovery_per_head_retry_interval_ms(),
         3_000 + 3
@@ -1696,13 +1695,19 @@ fn a_chain_info_value_violating_its_bound_falls_to_the_next_tier() {
     let module = loaded(&[Entry::Bytecode(parameter::VOTE_SCALE, &program)]);
     let config = module.active_configuration().expect("content is loaded");
     assert_eq!(
-        config.with_chain_info(FixedNodeCount(1)).vote_scale().get(),
+        config
+            .with_chain_info(&FixedNodeCount(1))
+            .vote_scale()
+            .get(),
         1000
     );
     let module = loaded(&[Entry::Bytecode(parameter::VOTE_SCALE, &program)]);
     let config = module.active_configuration().expect("content is loaded");
     assert_eq!(
-        config.with_chain_info(FixedNodeCount(5)).vote_scale().get(),
+        config
+            .with_chain_info(&FixedNodeCount(5))
+            .vote_scale()
+            .get(),
         4,
         "in bounds, the computed value is used"
     );

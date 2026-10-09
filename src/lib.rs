@@ -312,6 +312,9 @@ pub mod chain_info {
 /// Arity of each chain-info identifier, indexed by `id - 1`.
 const CHAIN_INFO_ARITY: [u8; 1] = [0];
 
+// One entry per allocated identifier: the table ends at the highest one.
+const _: () = assert!(CHAIN_INFO_ARITY.len() == chain_info::REGISTERED_NODE_COUNT as usize);
+
 /// The arity of chain-info `id`, or `None` if it is not allocated.
 pub fn chain_info_arity(id: u8) -> Option<u8> {
     CHAIN_INFO_ARITY.get((id as usize).checked_sub(1)?).copied()
@@ -330,7 +333,6 @@ pub trait ChainInfoSource {
 }
 
 /// The source of a handle with nothing bound: every read is declined.
-#[derive(Clone, Copy)]
 pub struct NoChainInfo;
 
 impl ChainInfoSource for NoChainInfo {
@@ -952,7 +954,7 @@ impl<Sink: ConfigChangeSink> ChainConfigTrait for ChainConfiguration<Sink> {
             // worse than no handle.
             view: ChainConfigBlockPayloadView::from_payload(self.retained_payload())?,
             commitment: self.commitment?,
-            chain_info: NoChainInfo,
+            chain_info: &NoChainInfo,
         })
     }
 
@@ -1014,10 +1016,13 @@ impl<Sink: ConfigChangeSink> ChainConfigTrait for ChainConfiguration<Sink> {
 /// **every accessor on an obtained handle returns a value** — there is no
 /// not-available case to handle per parameter.
 ///
-/// `C` is the chain-info source programs read through `GETCHAININFO`. A handle is
-/// obtained with [`NoChainInfo`] and bound with [`Self::with_chain_info`] by the
-/// caller that knows the evaluation anchor, so no accessor signature carries it.
-pub struct ActiveConfig<'a, C: ChainInfoSource = NoChainInfo> {
+/// The chain-info source programs read through `GETCHAININFO` is held by
+/// reference: a handle is obtained with [`NoChainInfo`] and bound with
+/// [`Self::with_chain_info`] by the caller that knows the evaluation anchor, so no
+/// accessor signature carries it. A trait object rather than a type parameter,
+/// because the handle is the VM's host: a generic handle would compile the whole
+/// interpreter and every accessor once per source type.
+pub struct ActiveConfig<'a> {
     /// The envelope, walked and validated **once** when the handle was acquired.
     /// Every accessor re-resolves against it, but none re-validates the framing:
     /// re-deriving the content boundary per accessor — twice per accessor, in
@@ -1025,10 +1030,10 @@ pub struct ActiveConfig<'a, C: ChainInfoSource = NoChainInfo> {
     /// information.
     view: ChainConfigBlockPayloadView<'a>,
     commitment: Commitment,
-    chain_info: C,
+    chain_info: &'a dyn ChainInfoSource,
 }
 
-impl<'a, C: ChainInfoSource> ActiveConfig<'a, C> {
+impl<'a> ActiveConfig<'a> {
     /// Which FR8 commitment produced these values.
     pub fn commitment(&self) -> Commitment {
         self.commitment
@@ -1038,11 +1043,10 @@ impl<'a, C: ChainInfoSource> ActiveConfig<'a, C> {
     ///
     /// Bind it where the evaluation anchor is known (specification §4.6 rule 4);
     /// a handle left unbound declines every read.
-    pub fn with_chain_info<D: ChainInfoSource>(self, source: D) -> ActiveConfig<'a, D> {
-        ActiveConfig {
-            view: self.view,
-            commitment: self.commitment,
+    pub fn with_chain_info(self, source: &'a dyn ChainInfoSource) -> Self {
+        Self {
             chain_info: source,
+            ..self
         }
     }
 
@@ -1092,10 +1096,11 @@ impl<'a, C: ChainInfoSource> ActiveConfig<'a, C> {
     /// FR37 `vote_scale` — the per-credit vote value, and the anti-capture
     /// interest denominator, which is why zero is refused at acceptance.
     pub fn vote_scale(&self) -> NonZeroU16 {
-        // Acceptance refuses a declared zero and the parameter is literal-only,
-        // so accepted content cannot reach the `unwrap_or`: it is tier 3, the
-        // code-baked fallback literal, and this is the one accessor whose return
-        // type makes that tier visible in the signature.
+        // Acceptance refuses a declared zero, the resolution guard refuses a
+        // computed one, and narrowing saturates rather than wrapping, so no
+        // resolved value reaches the `unwrap_or`: it is tier 3, the code-baked
+        // fallback literal, and this is the one accessor whose return type makes
+        // that tier visible in the signature.
         NonZeroU16::new(narrow_u16(self.resolve(parameter::VOTE_SCALE, &[])))
             .unwrap_or(FALLBACK_VOTE_SCALE)
     }
@@ -1353,7 +1358,7 @@ impl<'a, C: ChainInfoSource> ActiveConfig<'a, C> {
     }
 }
 
-impl<C: ChainInfoSource> VmHost for ActiveConfig<'_, C> {
+impl VmHost for ActiveConfig<'_> {
     fn call(&self, func_id: u16, selector: u8, args: &[u64], fuel: &mut Fuel) -> Option<u64> {
         if func_id == HOST_READ_CHAIN_INFO {
             // As for parameters, the declared count must match the registry's
