@@ -5,7 +5,7 @@ divergence in these values is a divergence in validation outcome. This crate
 owns that agreement. It decodes the configuration content carried by chain-config
 blocks (`payload_type = 3`), holds the FR8 tentative/durable commitment state,
 resolves every parameter through a fixed registry of code-baked defaults, and
-evaluates the small programs that compute the argument-dependent ones. The
+evaluates the small programs that compute the computed ones. The
 blockchain consumes the result through per-parameter accessors and never
 interprets a configuration key itself (FR56).
 
@@ -157,7 +157,7 @@ pub const SCORING_MATRIX_LEN: usize = 5;
 /// default**.
 ///
 /// The limit bounds how long one program evaluation may hold the core, and
-/// acceptance pays that bound once per argument-less program — up to the 126
+/// a content may carry one program per entry — up to the 126
 /// entries the key space allows — so an unbounded limit would let one content
 /// hold the core for as long as it asked, against a watchdog.
 ///
@@ -249,8 +249,8 @@ pub mod parameter {
     /// [`MAX_AGGREGATED_SIGNATURES`], applied as a clamp.
     pub const REQUIRED_SUPPORT: u8 = 10;
 
-    // Radio runtime tuning, 11 through 19. Literal-only and argument-less by rule
-    // (§4.5, §10.2) — see `RADIO_IDS`, which asserts both.
+    // Radio runtime tuning, 11 through 19. Literal-only by rule (§4.5, §10.2) —
+    // see `RADIO_IDS`, which asserts it.
 
     /// Radio: minimum interval between echo requests, minutes.
     pub const ECHO_REQUEST_MINIMAL_INTERVAL: u8 = 11;
@@ -280,7 +280,8 @@ pub mod parameter {
     pub const MEMPOOL_REPLENISHMENT_INTERVAL_MS: u8 = 22;
     /// FR51 carry-forward custodian fee.
     pub const CUSTODIAN_FEE: u8 = 23;
-    /// Registration price; takes the registered-node count as its argument.
+    /// Registration price. A size-dependent price reads the registered-node count
+    /// through chain-info (specification §4.6).
     pub const REGISTRATION_PRICE: u8 = 24;
     /// FR56 minimum transaction fee per byte.
     pub const TX_FEE_PER_BYTE_MIN: u8 = 25;
@@ -355,9 +356,6 @@ pub struct ParameterSpec {
     /// no variable-length integer parsing, no ambiguity about zero-padding, and
     /// a width mismatch is a clean rejection rather than a reinterpretation.
     pub width: u8,
-    /// Accessor arity — hence the argument count a `GETCONFIG` naming this
-    /// identifier must declare.
-    pub args: u8,
     /// Whether a bytecode *override* is permitted.
     ///
     /// Literal-only where a program could not be held to the parameter's bound:
@@ -380,8 +378,8 @@ pub struct ParameterSpec {
 
 /// What a parameter's code-baked default is.
 ///
-/// A default may be a program with the same argument semantics as the accessor,
-/// which is what makes tier 2 a real tier rather than a synonym for tier 3
+/// A default may be a program, which is what makes tier 2 a real tier rather
+/// than a synonym for tier 3
 /// (specification §5.1, PRD FR56). No parameter in the registry uses the program
 /// form today; the representation exists so that adding one is a table edit
 /// rather than a change to the resolution model.
@@ -393,17 +391,10 @@ pub enum DefaultValue {
 }
 
 /// A parameter whose default is a literal: tiers 2 and 3 are that one value.
-const fn spec_of(
-    id: u8,
-    width: u8,
-    args: u8,
-    bytecode_allowed: bool,
-    default: u64,
-) -> ParameterSpec {
+const fn spec_of(id: u8, width: u8, bytecode_allowed: bool, default: u64) -> ParameterSpec {
     ParameterSpec {
         id,
         width,
-        args,
         bytecode_allowed,
         default: DefaultValue::Literal(default),
         fallback: default,
@@ -417,7 +408,6 @@ const fn spec_of(
 const fn spec_of_program(
     id: u8,
     width: u8,
-    args: u8,
     bytecode_allowed: bool,
     default: &'static [u8],
     fallback: u64,
@@ -425,7 +415,6 @@ const fn spec_of_program(
     ParameterSpec {
         id,
         width,
-        args,
         bytecode_allowed,
         default: DefaultValue::Program(default),
         fallback,
@@ -435,38 +424,35 @@ const fn spec_of_program(
 /// The registry, in identifier order. See [`parameter`] for the identifiers and
 /// the wire-format rules that govern them.
 const REGISTRY: [ParameterSpec; 29] = [
-    spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, 0, true, 60_000),
-    spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, 0, true, 30_000),
-    spec_of(parameter::BLOCK_SIZE_LIMIT, 2, 0, false, 2016),
-    spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 2, 0, false, 255),
-    spec_of(parameter::MAX_AGGREGATED_SIGNATURES, 1, 0, false, 50),
-    spec_of(parameter::VOTE_SCALE, 2, 0, true, 1000),
-    spec_of(parameter::VOTE_INTEREST, 1, 0, true, 5),
+    spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, true, 60_000),
+    spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, true, 30_000),
+    spec_of(parameter::BLOCK_SIZE_LIMIT, 2, false, 2016),
+    spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 2, false, 255),
+    spec_of(parameter::MAX_AGGREGATED_SIGNATURES, 1, false, 50),
+    spec_of(parameter::VOTE_SCALE, 2, true, 1000),
+    spec_of(parameter::VOTE_INTEREST, 1, true, 5),
     spec_of(
         parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS,
         4,
-        0,
         true,
         120_000,
     ),
     spec_of(
         parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS,
         4,
-        0,
         true,
         10_000,
     ),
-    spec_of(parameter::REQUIRED_SUPPORT, 1, 0, true, 3),
-    spec_of(parameter::ECHO_REQUEST_MINIMAL_INTERVAL, 2, 0, false, 1440),
-    spec_of(parameter::ECHO_MESSAGES_TARGET_INTERVAL, 1, 0, false, 100),
-    spec_of(parameter::ECHO_GATHERING_TIMEOUT, 1, 0, false, 10),
-    spec_of(parameter::DELAY_BETWEEN_TX_PACKETS, 2, 0, false, 200),
-    spec_of(parameter::DELAY_BETWEEN_TX_MESSAGES, 1, 0, false, 20),
-    spec_of(parameter::RELAY_POSITION_DELAY, 1, 0, false, 10),
+    spec_of(parameter::REQUIRED_SUPPORT, 1, true, 3),
+    spec_of(parameter::ECHO_REQUEST_MINIMAL_INTERVAL, 2, false, 1440),
+    spec_of(parameter::ECHO_MESSAGES_TARGET_INTERVAL, 1, false, 100),
+    spec_of(parameter::ECHO_GATHERING_TIMEOUT, 1, false, 10),
+    spec_of(parameter::DELAY_BETWEEN_TX_PACKETS, 2, false, 200),
+    spec_of(parameter::DELAY_BETWEEN_TX_MESSAGES, 1, false, 20),
+    spec_of(parameter::RELAY_POSITION_DELAY, 1, false, 10),
     spec_of(
         parameter::SCORING_MATRIX,
         SCORING_MATRIX_LEN as u8,
-        0,
         false,
         // Array-typed values are carried verbatim; a value of at most eight
         // bytes round-trips through this crate's `u64` representation exactly,
@@ -474,36 +460,28 @@ const REGISTRY: [ParameterSpec; 29] = [
         // override would supply.
         u64::from_le_bytes([255, 243, 65, 82, 143, 0, 0, 0]),
     ),
-    spec_of(
-        parameter::RETRY_INTERVAL_FOR_MISSING_PACKETS,
-        1,
-        0,
-        false,
-        60,
-    ),
-    spec_of(parameter::TX_MAXIMUM_RANDOM_DELAY, 2, 0, false, 200),
-    spec_of(parameter::BLOCK_FILL_THRESHOLD_PERCENT, 1, 0, true, 80),
-    spec_of(parameter::ACTIVE_CHAIN_LENGTH, 2, 0, false, 500),
+    spec_of(parameter::RETRY_INTERVAL_FOR_MISSING_PACKETS, 1, false, 60),
+    spec_of(parameter::TX_MAXIMUM_RANDOM_DELAY, 2, false, 200),
+    spec_of(parameter::BLOCK_FILL_THRESHOLD_PERCENT, 1, true, 80),
+    spec_of(parameter::ACTIVE_CHAIN_LENGTH, 2, false, 500),
     spec_of(
         parameter::MEMPOOL_REPLENISHMENT_INTERVAL_MS,
         4,
-        0,
         true,
         500_000,
     ),
-    spec_of(parameter::CUSTODIAN_FEE, 8, 0, true, 1),
-    spec_of(parameter::REGISTRATION_PRICE, 8, 1, true, 100),
-    spec_of(parameter::TX_FEE_PER_BYTE_MIN, 8, 0, true, 0),
-    spec_of(parameter::TX_FEE_PER_BYTE_MAX, 8, 0, true, 1000),
+    spec_of(parameter::CUSTODIAN_FEE, 8, true, 1),
+    spec_of(parameter::REGISTRATION_PRICE, 8, true, 100),
+    spec_of(parameter::TX_FEE_PER_BYTE_MIN, 8, true, 0),
+    spec_of(parameter::TX_FEE_PER_BYTE_MAX, 8, true, 1000),
     spec_of(
         parameter::DEVIATION_REPLAY_INSERTION_DELAY_MS,
         4,
-        0,
         true,
         300_000,
     ),
-    spec_of(parameter::REPLAY_BLOCK_REWARD, 8, 0, true, 100),
-    spec_of(parameter::VM_FUEL_LIMIT, 4, 0, false, 20_000),
+    spec_of(parameter::REPLAY_BLOCK_REWARD, 8, true, 100),
+    spec_of(parameter::VM_FUEL_LIMIT, 4, false, 20_000),
 ];
 
 // Identifiers are allocated densely from 1, so the record for an identifier sits
@@ -525,34 +503,6 @@ const _: () = {
 /// Number of identifiers the registry allocates. The next free identifier is
 /// `PARAMETER_COUNT + 1` while allocation stays dense.
 pub const PARAMETER_COUNT: usize = REGISTRY.len();
-
-/// The identifiers [`check_bound`] constrains.
-///
-/// Named as a table rather than left implicit in the `match`, so that the
-/// registry invariant behind it can be asserted at compile time: a bound is only
-/// enforceable on a value knowable at acceptance time, and an argument-taking
-/// parameter's value is not, so a bounded parameter must have arity zero
-/// (specification §6).
-const BOUNDED_IDS: [u8; 10] = [
-    parameter::BLOCK_SIZE_LIMIT,
-    parameter::MAX_BLOCK_UTXO_OUTPUT,
-    parameter::MAX_AGGREGATED_SIGNATURES,
-    parameter::VOTE_SCALE,
-    parameter::REQUIRED_SUPPORT,
-    parameter::BLOCK_FILL_THRESHOLD_PERCENT,
-    parameter::ACTIVE_CHAIN_LENGTH,
-    parameter::TX_FEE_PER_BYTE_MIN,
-    parameter::TX_FEE_PER_BYTE_MAX,
-    parameter::VM_FUEL_LIMIT,
-];
-
-const _: () = {
-    let mut index = 0;
-    while index < BOUNDED_IDS.len() {
-        assert!(REGISTRY[BOUNDED_IDS[index] as usize - 1].args == 0);
-        index += 1;
-    }
-};
 
 /// The identifiers whose bound is measured against a compile-time constant of the
 /// **local build** rather than against a universal one.
@@ -660,7 +610,7 @@ const _: () = {
 
 /// The radio runtime-tuning identifiers, 11 through 19.
 ///
-/// These are **literal-only by rule**, and argument-less by rule (§10.2). The radio
+/// These are **literal-only by rule** (§10.2). The radio
 /// does not call an accessor: it consumes a snapshot the node runtime builds at a
 /// configuration change and publishes to the other core, where several real-time
 /// tasks hold their own copies. A program could therefore only ever compute from
@@ -686,7 +636,6 @@ const _: () = {
     while index < RADIO_IDS.len() {
         let spec = &REGISTRY[RADIO_IDS[index] as usize - 1];
         assert!(!spec.bytecode_allowed);
-        assert!(spec.args == 0);
         index += 1;
     }
 };
@@ -721,8 +670,7 @@ fn spec(id: u8) -> &'static ParameterSpec {
 /// The registry record for `id`, or `None` if the registry does not allocate it.
 ///
 /// The host-side `config-encoder` reads the registry through this: it needs the
-/// literal width to encode a value, the arity to check a `GETCONFIG`, and the
-/// permitted value form to refuse a program where one is not allowed. Runtime
+/// literal width to encode a value and the permitted value form to refuse a program where one is not allowed. Runtime
 /// paths use the infallible lookup above.
 pub fn parameter_spec(id: u8) -> Option<&'static ParameterSpec> {
     if is_allocated(id) {
@@ -1054,17 +1002,17 @@ impl<'a> ActiveConfig<'a> {
 
     /// FR45 (b) inter-block creation wait, milliseconds.
     pub fn inter_block_interval_ms(&self) -> u32 {
-        narrow_u32(self.resolve(parameter::INTER_BLOCK_INTERVAL_MS, &[]))
+        narrow_u32(self.resolve(parameter::INTER_BLOCK_INTERVAL_MS))
     }
 
     /// FR47 grace-period window length, milliseconds.
     pub fn grace_period_window_ms(&self) -> u32 {
-        narrow_u32(self.resolve(parameter::GRACE_PERIOD_WINDOW_MS, &[]))
+        narrow_u32(self.resolve(parameter::GRACE_PERIOD_WINDOW_MS))
     }
 
     /// Chain-config block-size limit, at most `MAX_BLOCK_SIZE`.
     pub fn block_size_limit(&self) -> u16 {
-        narrow_u16(self.resolve(parameter::BLOCK_SIZE_LIMIT, &[]))
+        narrow_u16(self.resolve(parameter::BLOCK_SIZE_LIMIT))
     }
 
     /// Maximum UTXO outputs per block — the **chain's declared value**.
@@ -1085,12 +1033,12 @@ impl<'a> ActiveConfig<'a> {
     /// number is now representable and is rejected; only legal values reach
     /// this accessor.
     pub fn max_utxo_outputs(&self) -> u16 {
-        narrow_u16(self.resolve(parameter::MAX_BLOCK_UTXO_OUTPUT, &[]))
+        narrow_u16(self.resolve(parameter::MAX_BLOCK_UTXO_OUTPUT))
     }
 
     /// Maximum aggregated signatures per approval-evidence block (ADR-015).
     pub fn max_aggregated_signatures(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::MAX_AGGREGATED_SIGNATURES, &[]))
+        narrow_u8(self.resolve(parameter::MAX_AGGREGATED_SIGNATURES))
     }
 
     /// FR37 `vote_scale` — the per-credit vote value, and the anti-capture
@@ -1101,23 +1049,23 @@ impl<'a> ActiveConfig<'a> {
         // resolved value reaches the `unwrap_or`: it is tier 3, the code-baked
         // fallback literal, and this is the one accessor whose return type makes
         // that tier visible in the signature.
-        NonZeroU16::new(narrow_u16(self.resolve(parameter::VOTE_SCALE, &[])))
+        NonZeroU16::new(narrow_u16(self.resolve(parameter::VOTE_SCALE)))
             .unwrap_or(FALLBACK_VOTE_SCALE)
     }
 
     /// FR37 anti-capture vote-interest rate.
     pub fn vote_interest(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::VOTE_INTEREST, &[]))
+        narrow_u8(self.resolve(parameter::VOTE_INTEREST))
     }
 
     /// FR19 / FR46 per-head parent-recovery retry window, milliseconds.
     pub fn parent_recovery_per_head_retry_interval_ms(&self) -> u32 {
-        narrow_u32(self.resolve(parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS, &[]))
+        narrow_u32(self.resolve(parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS))
     }
 
     /// FR46 module-scope parent-recovery emit cooldown, milliseconds.
     pub fn parent_recovery_min_emit_interval_ms(&self) -> u32 {
-        narrow_u32(self.resolve(parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS, &[]))
+        narrow_u32(self.resolve(parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS))
     }
 
     /// ADR-015 required support count, **clamped to the chain's own
@@ -1137,19 +1085,18 @@ impl<'a> ActiveConfig<'a> {
     /// grow with the network, never exceed what the evidence can carry — where a
     /// fallback would discard the computation for the code-baked default.
     pub fn required_support(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::REQUIRED_SUPPORT, &[]))
-            .min(self.max_aggregated_signatures())
+        narrow_u8(self.resolve(parameter::REQUIRED_SUPPORT)).min(self.max_aggregated_signatures())
     }
 
     /// FR45 (a) block fill threshold, percent.
     pub fn block_fill_threshold_percent(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::BLOCK_FILL_THRESHOLD_PERCENT, &[]))
+        narrow_u8(self.resolve(parameter::BLOCK_FILL_THRESHOLD_PERCENT))
     }
 
     /// Active-chain window length `W`, at most the caller's
     /// [`crate::BuildLimits::snake_chain_length_max`].
     pub fn active_chain_length(&self) -> u16 {
-        narrow_u16(self.resolve(parameter::ACTIVE_CHAIN_LENGTH, &[]))
+        narrow_u16(self.resolve(parameter::ACTIVE_CHAIN_LENGTH))
     }
 
     /// FR56 mempool replenishment interval, milliseconds.
@@ -1157,21 +1104,21 @@ impl<'a> ActiveConfig<'a> {
     /// `u32` is ample: it carries 49 days of milliseconds against a default of
     /// eight and a half minutes.
     pub fn mempool_replenishment_interval_ms(&self) -> u32 {
-        narrow_u32(self.resolve(parameter::MEMPOOL_REPLENISHMENT_INTERVAL_MS, &[]))
+        narrow_u32(self.resolve(parameter::MEMPOOL_REPLENISHMENT_INTERVAL_MS))
     }
 
     /// FR51 carry-forward custodian fee.
     pub fn custodian_fee(&self) -> u64 {
-        self.resolve(parameter::CUSTODIAN_FEE, &[])
+        self.resolve(parameter::CUSTODIAN_FEE)
     }
 
-    /// Registration price at a given registered-node count.
+    /// Registration price.
     ///
-    /// The arity is part of the registry, so it holds even while the default is
-    /// a plain literal that does not vary with the argument: a chain wanting a
-    /// size-dependent price overrides the key with a program of the same arity.
-    pub fn registration_price(&self, registered_nodes: u32) -> u64 {
-        self.resolve(parameter::REGISTRATION_PRICE, &[registered_nodes as u64])
+    /// Like every parameter it takes no argument: a chain wanting a
+    /// size-dependent price overrides the key with a program that reads the
+    /// registered-node count through `GETCHAININFO` (specification §4.6).
+    pub fn registration_price(&self) -> u64 {
+        self.resolve(parameter::REGISTRATION_PRICE)
     }
 
     /// FR56 minimum transaction fee per byte.
@@ -1185,56 +1132,56 @@ impl<'a> ActiveConfig<'a> {
     /// not assume `min <= max`. Note that whatever it does must be deterministic,
     /// since both nodes read the same content and must reach the same fee.
     pub fn tx_fee_per_byte_min(&self) -> u64 {
-        self.resolve(parameter::TX_FEE_PER_BYTE_MIN, &[])
+        self.resolve(parameter::TX_FEE_PER_BYTE_MIN)
     }
 
     /// FR56 maximum transaction fee per byte. See
     /// [`tx_fee_per_byte_min`](Self::tx_fee_per_byte_min): the pair is not
     /// guaranteed ordered, and the consumer resolves an inconsistent range.
     pub fn tx_fee_per_byte_max(&self) -> u64 {
-        self.resolve(parameter::TX_FEE_PER_BYTE_MAX, &[])
+        self.resolve(parameter::TX_FEE_PER_BYTE_MAX)
     }
 
     /// FR29 deviation-replay insertion delay, milliseconds.
     pub fn deviation_replay_insertion_delay_ms(&self) -> u32 {
-        narrow_u32(self.resolve(parameter::DEVIATION_REPLAY_INSERTION_DELAY_MS, &[]))
+        narrow_u32(self.resolve(parameter::DEVIATION_REPLAY_INSERTION_DELAY_MS))
     }
 
     /// FR36 (c) replay-block reward.
     pub fn replay_block_reward(&self) -> u64 {
-        self.resolve(parameter::REPLAY_BLOCK_REWARD, &[])
+        self.resolve(parameter::REPLAY_BLOCK_REWARD)
     }
 
-    // -- Radio parameters (argument-less by rule) --
+    // -- Radio parameters (literal-only by rule) --
 
     /// Minimum interval between echo requests, minutes.
     pub fn echo_request_minimal_interval(&self) -> u16 {
-        narrow_u16(self.resolve(parameter::ECHO_REQUEST_MINIMAL_INTERVAL, &[]))
+        narrow_u16(self.resolve(parameter::ECHO_REQUEST_MINIMAL_INTERVAL))
     }
 
     /// Target interval between echo messages, seconds.
     pub fn echo_messages_target_interval(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::ECHO_MESSAGES_TARGET_INTERVAL, &[]))
+        narrow_u8(self.resolve(parameter::ECHO_MESSAGES_TARGET_INTERVAL))
     }
 
     /// Echo-gathering timeout, minutes.
     pub fn echo_gathering_timeout(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::ECHO_GATHERING_TIMEOUT, &[]))
+        narrow_u8(self.resolve(parameter::ECHO_GATHERING_TIMEOUT))
     }
 
     /// Delay between transmitted packets, milliseconds.
     pub fn delay_between_tx_packets(&self) -> u16 {
-        narrow_u16(self.resolve(parameter::DELAY_BETWEEN_TX_PACKETS, &[]))
+        narrow_u16(self.resolve(parameter::DELAY_BETWEEN_TX_PACKETS))
     }
 
     /// Delay between transmitted messages, seconds.
     pub fn delay_between_tx_messages(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::DELAY_BETWEEN_TX_MESSAGES, &[]))
+        narrow_u8(self.resolve(parameter::DELAY_BETWEEN_TX_MESSAGES))
     }
 
     /// Relay-position delay, seconds.
     pub fn relay_position_delay(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::RELAY_POSITION_DELAY, &[]))
+        narrow_u8(self.resolve(parameter::RELAY_POSITION_DELAY))
     }
 
     /// Encoded connection-quality scoring matrix.
@@ -1244,7 +1191,7 @@ impl<'a> ActiveConfig<'a> {
     /// of at most eight bytes round-trips through the `u64` resolution path
     /// unchanged.
     pub fn scoring_matrix(&self) -> [u8; SCORING_MATRIX_LEN] {
-        let value = self.resolve(parameter::SCORING_MATRIX, &[]).to_le_bytes();
+        let value = self.resolve(parameter::SCORING_MATRIX).to_le_bytes();
         let mut matrix = [0u8; SCORING_MATRIX_LEN];
         matrix.copy_from_slice(&value[..SCORING_MATRIX_LEN]);
         matrix
@@ -1252,24 +1199,24 @@ impl<'a> ActiveConfig<'a> {
 
     /// Retry interval for missing packets, seconds.
     pub fn retry_interval_for_missing_packets(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::RETRY_INTERVAL_FOR_MISSING_PACKETS, &[]))
+        narrow_u8(self.resolve(parameter::RETRY_INTERVAL_FOR_MISSING_PACKETS))
     }
 
     /// Maximum randomised transmit delay, milliseconds.
     pub fn tx_maximum_random_delay(&self) -> u16 {
-        narrow_u16(self.resolve(parameter::TX_MAXIMUM_RANDOM_DELAY, &[]))
+        narrow_u16(self.resolve(parameter::TX_MAXIMUM_RANDOM_DELAY))
     }
 
     // -- VM parameters --
 
     /// Fuel budget of one program evaluation.
     pub fn vm_fuel_limit(&self) -> u32 {
-        narrow_u32(self.resolve(parameter::VM_FUEL_LIMIT, &[]))
+        narrow_u32(self.resolve(parameter::VM_FUEL_LIMIT))
     }
 
     // -- Resolution --
 
-    /// Resolves `id` over `args` through the three tiers.
+    /// Resolves `id` through the three tiers.
     ///
     /// Tier 1 is the chain-config override, tier 2 the code-baked default, tier 3
     /// the code-baked fallback literal. A tier fails — and resolution moves to the
@@ -1281,16 +1228,16 @@ impl<'a> ActiveConfig<'a> {
     /// would be dead code. Sharing happens along the other axis — a nested
     /// `GETCONFIG` draws from the budget of the invocation that started it, so a
     /// program cannot evade the bound by composing sub-evaluations.
-    fn resolve(&self, id: u8, args: &[u64]) -> u64 {
+    fn resolve(&self, id: u8) -> u64 {
         let mut fuel = Fuel::new(self.fuel_limit());
-        self.resolve_with(spec(id), args, &mut fuel)
+        self.resolve_with(spec(id), &mut fuel)
     }
 
     /// Resolution against a caller-supplied budget — the nesting path.
-    fn resolve_with(&self, spec: &ParameterSpec, args: &[u64], fuel: &mut Fuel) -> u64 {
+    fn resolve_with(&self, spec: &ParameterSpec, fuel: &mut Fuel) -> u64 {
         // Tier 1 — the chain-config override, on the caller's budget.
         if let Some(entry) = self.entry(spec.id)
-            && let Some(value) = self.evaluate(&entry, spec, args, fuel)
+            && let Some(value) = self.evaluate(&entry, spec, fuel)
         {
             return value;
         }
@@ -1301,7 +1248,7 @@ impl<'a> ActiveConfig<'a> {
             DefaultValue::Program(program) => {
                 let mut tier_fuel = Fuel::new(self.fuel_limit());
                 if let VmOutcome::Completed(value) =
-                    ConfigVm::execute(program, args, &mut tier_fuel, self)
+                    ConfigVm::execute(program, &[], &mut tier_fuel, self)
                     && let Some(value) = bounded(spec.id, value)
                 {
                     return value;
@@ -1323,14 +1270,13 @@ impl<'a> ActiveConfig<'a> {
         &self,
         entry: &ConfigValueView<'_>,
         spec: &ParameterSpec,
-        args: &[u64],
         fuel: &mut Fuel,
     ) -> Option<u64> {
         if entry.is_bytecode() {
             if !spec.bytecode_allowed {
                 return None;
             }
-            match ConfigVm::execute(entry.value(), args, fuel, self) {
+            match ConfigVm::execute(entry.value(), &[], fuel, self) {
                 // A computed value has to clear the same bound a declared literal
                 // does. Acceptance cannot check it — it evaluates nothing — so the
                 // check happens here, and a violation is treated exactly like a
@@ -1372,15 +1318,16 @@ impl VmHost for ActiveConfig<'_> {
             return None;
         }
         let spec = spec(selector);
-        // `args.len()` is the count the *program* declared. The registry holds
-        // the arity, and the VM deliberately does not, so validating that the
-        // two agree is this seam's responsibility and no one else's.
-        if args.len() != spec.args as usize {
+        // Parameters take no arguments (specification §4.5): a chain-derived
+        // input is read through `GETCHAININFO`. `args.len()` is the count the
+        // *program* declared, which the VM does not check, so a `GETCONFIG`
+        // declaring any is declined here.
+        if !args.is_empty() {
             return None;
         }
         // The nested evaluation draws from the caller's budget, so exhaustion
         // aborts the whole invocation rather than just this sub-evaluation.
-        Some(self.resolve_with(spec, args, fuel))
+        Some(self.resolve_with(spec, fuel))
     }
 }
 
@@ -1472,9 +1419,9 @@ fn narrow_u32(value: u64) -> u32 {
 /// 3. **Declared literals**: the structural bounds, on the values the content
 ///    states outright, plus the one invariant that spans two parameters.
 ///
-/// **No program is run here.** Checking a program's result ahead of time is only
-/// possible when it takes no arguments, so such a pass is partial by construction
-/// and grows more partial with every argument-taking parameter the registry gains.
+/// **No program is run here.** A program may read chain-info, which no
+/// acceptance-time context can supply, so checking results ahead of time would be
+/// partial by construction.
 /// A misbehaving program is already covered completely by the resolution model: a
 /// trap or an exhausted budget fails that tier and the value falls through to the
 /// code-baked default and then to the fallback literal, identically on every node
@@ -1510,14 +1457,12 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
 
     // Pass 2 — the structural bounds, on the declared literals.
     //
-    // **Bytecode overrides are not evaluated here.** A program's result can only
-    // be checked ahead of time when it takes no arguments, so any such pass is
-    // partial by construction — and it becomes more partial with every
-    // argument-taking parameter the registry gains. The runtime already has the
-    // complete mechanism for a program that misbehaves: a trap or an exhausted
-    // budget fails that tier and resolution falls through to the code-baked
-    // default and then to the fallback literal, deterministically and identically
-    // on every node (§7.3). Trusting one total mechanism is worth more than
+    // **Bytecode overrides are not evaluated here.** A program may read chain-info,
+    // which no acceptance-time context can supply, so any such pass is partial by
+    // construction. The runtime already has the complete mechanism for a program
+    // that misbehaves: a trap or an exhausted budget fails that tier and resolution
+    // falls through to the code-baked default and then to the fallback literal,
+    // deterministically and identically on every node (§7.3). Trusting one total mechanism is worth more than
     // adding a second, incomplete one in front of it.
     //
     // What that leaves uncovered is bounded by the registry's own value forms.
@@ -1679,8 +1624,7 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
         // A window has to hold at least one block. The capacity above it is the
         // caller's, so it lives in `check_build_limit`.
         parameter::ACTIVE_CHAIN_LENGTH => declared >= 1,
-        // The budget every evaluation is bounded by, and which acceptance itself
-        // spends once per argument-less program. At zero every program silently
+        // The budget every evaluation is bounded by. At zero every program silently
         // resolves to its default with no diagnostic anywhere; unbounded above, a
         // single content could hold the core for as long as it asked.
         parameter::VM_FUEL_LIMIT => declared >= 1 && declared <= VM_FUEL_LIMIT_MAX as u64,

@@ -398,7 +398,8 @@ fn check_host_call_arity(line_no: usize, line: &str) -> Result<(), EncodeError> 
         if chain_info {
             chain_info_arity(id)
         } else {
-            parameter_spec(id).map(|spec| spec.args)
+            // Parameters take no arguments (specification §4.5).
+            parameter_spec(id).map(|_| 0)
         }
     });
     let Some(arity) = arity else {

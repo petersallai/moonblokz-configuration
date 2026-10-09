@@ -127,12 +127,9 @@ const UNDEFINED_OPCODE_PROGRAM: [u8; 1] = [0xC0];
 /// tier-2 default.
 const PUSH_41_PROGRAM: [u8; 3] = push_u8_program(41);
 
-/// `ARG 0; PUSH_U8 2; MUL; RET` — doubles its argument.
-const DOUBLE_ARG_PROGRAM: [u8; 6] = [op::ARG, 0, op::PUSH_U8, 2, op::MUL, op::RET];
-
-/// `ARG 3; RET` — an operand index above the arity, so it traps at runtime while
-/// acceptance cannot reach it.
-const ARG_OUT_OF_RANGE_PROGRAM: [u8; 3] = [op::ARG, 3, op::RET];
+/// `ARG 0; RET` — parameters take no arguments, so the operand index is out of
+/// range: it traps at runtime, which acceptance does not reach.
+const ARG_OUT_OF_RANGE_PROGRAM: [u8; 3] = [op::ARG, 0, op::RET];
 
 // ---------------------------------------------------------------------------
 // Defaults — the neutrality bar
@@ -161,8 +158,7 @@ fn empty_override_set_resolves_every_default() {
     assert_eq!(config.active_chain_length(), 500);
     assert_eq!(config.mempool_replenishment_interval_ms(), 500_000);
     assert_eq!(config.custodian_fee(), 1);
-    assert_eq!(config.registration_price(0), 100);
-    assert_eq!(config.registration_price(10_000), 100);
+    assert_eq!(config.registration_price(), 100);
     assert_eq!(config.tx_fee_per_byte_min(), 0);
     assert_eq!(config.tx_fee_per_byte_max(), 1000);
     assert_eq!(config.deviation_replay_insertion_delay_ms(), 300_000);
@@ -285,12 +281,12 @@ fn a_declared_argument_count_that_contradicts_the_registry_is_declined() {
         1,
         op::RET,
     ];
-    // Argument-taking so that acceptance does not evaluate it: the point here is
-    // the runtime fallback, not the acceptance rejection.
+    // Parameters take no arguments, so the host declines a `GETCONFIG` that
+    // declares one and the tier falls through at runtime.
     let module = loaded(&[Entry::Bytecode(parameter::REGISTRATION_PRICE, &program)]);
     let config = module.active_configuration().expect("handle");
 
-    assert_eq!(config.registration_price(5), 100);
+    assert_eq!(config.registration_price(), 100);
 }
 
 #[test]
@@ -299,30 +295,45 @@ fn an_unallocated_identifier_is_declined_at_the_host_seam() {
     let module = loaded(&[Entry::Bytecode(parameter::REGISTRATION_PRICE, &program)]);
     let config = module.active_configuration().expect("handle");
 
-    assert_eq!(config.registration_price(1), 100);
+    assert_eq!(config.registration_price(), 100);
 }
 
 #[test]
-fn an_argument_taking_program_that_traps_falls_back_to_the_default() {
-    // `ARG 3` with arity 1 is an operand index out of range: a runtime condition
-    // no acceptance-time check can reach, which is exactly why an argument-taking
-    // parameter may not carry a structural bound.
-    let program = [op::ARG, 3, op::RET];
-    let module = loaded(&[Entry::Bytecode(parameter::REGISTRATION_PRICE, &program)]);
+fn a_program_reading_an_argument_traps_and_falls_back_to_the_default() {
+    // Parameters take no arguments, so `ARG 0` is an operand index out of range:
+    // a runtime condition, and the tier falls through.
+    let module = loaded(&[Entry::Bytecode(
+        parameter::REGISTRATION_PRICE,
+        &ARG_OUT_OF_RANGE_PROGRAM,
+    )]);
     let config = module.active_configuration().expect("handle");
 
-    assert_eq!(config.registration_price(7), 100);
+    assert_eq!(config.registration_price(), 100);
 }
 
 #[test]
-fn an_argument_taking_program_receives_its_argument() {
-    // `registration_price(n) = 5 · n`
-    let program = [op::ARG, 0, op::PUSH_U8, 5, op::MUL, op::RET];
+fn registration_price_follows_the_node_count_through_chain_info() {
+    // `registration_price = 5 · registered_node_count` — what was an accessor
+    // argument is now read by the program itself.
+    let program = [
+        op::GETCHAININFO,
+        chain_info::REGISTERED_NODE_COUNT,
+        0,
+        op::PUSH_U8,
+        5,
+        op::MUL,
+        op::RET,
+    ];
     let module = loaded(&[Entry::Bytecode(parameter::REGISTRATION_PRICE, &program)]);
     let config = module.active_configuration().expect("handle");
-
-    assert_eq!(config.registration_price(0), 0);
-    assert_eq!(config.registration_price(200), 1000);
+    assert_eq!(config.registration_price(), 100, "unbound: the default");
+    let config = module.active_configuration().expect("handle");
+    assert_eq!(
+        config
+            .with_chain_info(&FixedNodeCount(200))
+            .registration_price(),
+        1000
+    );
 }
 
 #[test]
@@ -347,7 +358,7 @@ fn the_fuel_limit_override_bounds_evaluation() {
     let config = module.active_configuration().expect("handle");
 
     assert_eq!(config.vm_fuel_limit(), 1);
-    assert_eq!(config.registration_price(0), 100);
+    assert_eq!(config.registration_price(), 100);
 }
 
 #[test]
@@ -362,7 +373,7 @@ fn each_accessor_invocation_starts_from_a_fresh_budget() {
     let config = module.active_configuration().expect("handle");
 
     for _ in 0..8 {
-        assert_eq!(config.registration_price(0), 3);
+        assert_eq!(config.registration_price(), 3);
     }
 }
 
@@ -378,10 +389,10 @@ fn each_accessor_invocation_starts_from_a_fresh_budget() {
 fn a_program_default_resolves_as_tier_two() {
     let module = loaded(&[]);
     let config = module.active_configuration().expect("handle");
-    let spec = spec_of_program(parameter::CUSTODIAN_FEE, 8, 0, true, &PUSH_41_PROGRAM, 7);
+    let spec = spec_of_program(parameter::CUSTODIAN_FEE, 8, true, &PUSH_41_PROGRAM, 7);
 
     let mut fuel = Fuel::new(config.fuel_limit());
-    assert_eq!(config.resolve_with(&spec, &[], &mut fuel), 41);
+    assert_eq!(config.resolve_with(&spec, &mut fuel), 41);
 }
 
 #[test]
@@ -391,21 +402,20 @@ fn a_program_default_that_fails_falls_through_to_the_fallback_literal() {
     let spec = spec_of_program(
         parameter::CUSTODIAN_FEE,
         8,
-        0,
         true,
         &UNDEFINED_OPCODE_PROGRAM,
         7,
     );
 
     let mut fuel = Fuel::new(config.fuel_limit());
-    assert_eq!(config.resolve_with(&spec, &[], &mut fuel), 7);
+    assert_eq!(config.resolve_with(&spec, &mut fuel), 7);
 }
 
 #[test]
 fn tier_two_starts_from_a_fresh_budget_after_tier_one_exhausts_one() {
-    // The override traps at runtime — an operand index above the arity, which
-    // acceptance cannot reach because the parameter takes an argument — and the
-    // incoming budget is empty, which is what an exhausted tier-1 evaluation
+    // The override traps at runtime — an operand index out of range, which
+    // acceptance does not reach — and the incoming budget is empty, which is
+    // what an exhausted tier-1 evaluation
     // leaves behind. Tier 2 must still run, or every fuel-caused failure would
     // skip it and the tier would be dead code in exactly the case it exists for.
     let module = loaded(&[Entry::Bytecode(
@@ -413,18 +423,10 @@ fn tier_two_starts_from_a_fresh_budget_after_tier_one_exhausts_one() {
         &ARG_OUT_OF_RANGE_PROGRAM,
     )]);
     let config = module.active_configuration().expect("handle");
-    let spec = spec_of_program(
-        parameter::REGISTRATION_PRICE,
-        8,
-        1,
-        true,
-        &DOUBLE_ARG_PROGRAM,
-        7,
-    );
+    let spec = spec_of_program(parameter::REGISTRATION_PRICE, 8, true, &PUSH_41_PROGRAM, 7);
 
     let mut exhausted = Fuel::new(0);
-    // The argument reaches tier 2 with the same semantics the accessor has.
-    assert_eq!(config.resolve_with(&spec, &[21], &mut exhausted), 42);
+    assert_eq!(config.resolve_with(&spec, &mut exhausted), 41);
 }
 
 // ---------------------------------------------------------------------------
@@ -463,26 +465,6 @@ fn a_two_parameter_cycle_terminates_the_same_way() {
     // Each side bottoms out on the other's default once the nesting limit bites.
     assert_eq!(config.inter_block_interval_ms(), 30_000);
     assert_eq!(config.grace_period_window_ms(), 60_000);
-}
-
-#[test]
-fn a_cycle_through_an_argument_taking_parameter_terminates_at_runtime() {
-    // Acceptance does not evaluate an argument-taking program, so this cycle is
-    // reachable at resolution time — the case that would be a stack overflow if
-    // the nesting depth did not survive the host re-entry. It resolves to the
-    // default instead.
-    let program = [
-        op::ARG,
-        0,
-        op::GETCONFIG,
-        parameter::REGISTRATION_PRICE,
-        1,
-        op::RET,
-    ];
-    let module = loaded(&[Entry::Bytecode(parameter::REGISTRATION_PRICE, &program)]);
-    let config = module.active_configuration().expect("handle");
-
-    assert_eq!(config.registration_price(3), 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,9 +1299,9 @@ fn a_program_that_runs_out_of_fuel_is_accepted_and_falls_back() {
 
 #[test]
 fn no_program_is_evaluated_at_acceptance() {
-    // Neither form is run: an argument-taking program's result is unknowable
-    // ahead of time, and an argument-less one is left to the same total runtime
-    // mechanism rather than to a second, partial check.
+    // No program is run: a program may read chain-info, which acceptance cannot
+    // supply, so every program is left to the same total runtime mechanism rather
+    // than to a second, partial check.
     for id in [parameter::REGISTRATION_PRICE, parameter::VOTE_INTEREST] {
         let payload = frame(&[Entry::Bytecode(id, &UNDEFINED_OPCODE_PROGRAM)]);
         assert!(
