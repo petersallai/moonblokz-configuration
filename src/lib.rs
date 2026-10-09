@@ -45,7 +45,7 @@ use moonblokz_chain_types::{
     ChainConfigBlockPayloadView, ConfigValueView, HEADER_SIZE, MAX_BLOCK_SIZE, MAX_PAYLOAD_SIZE,
 };
 use moonblokz_crypto::MAX_AGGREGATED_SIGNATURES;
-use moonblokz_vm::{Fuel, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
+use moonblokz_vm::{Fuel, HOST_READ_CHAIN_INFO, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
 
 // ---------------------------------------------------------------------------
 // Compile-time capacities
@@ -293,6 +293,50 @@ pub mod parameter {
 
     /// Fuel budget of one program evaluation. Literal-only by rule.
     pub const VM_FUEL_LIMIT: u8 = 29;
+}
+
+/// The chain-info space (specification §4.6): quantities a program may read from
+/// the active chain through `GETCHAININFO`.
+///
+/// A second identifier space beside [`parameter`], not part of it. An identifier
+/// here has no key byte and no width — no content region can declare one — but it
+/// is just as permanent: it appears inside signed bytecode, whose interpretation
+/// is pinned for the lifetime of the chain. Allocate densely from 1, never reuse,
+/// never renumber.
+pub mod chain_info {
+    /// Number of nodes registered on the active chain. Node ids are contiguous,
+    /// so this is the node-id watermark plus one. Arity 0.
+    pub const REGISTERED_NODE_COUNT: u8 = 1;
+}
+
+/// Arity of each chain-info identifier, indexed by `id - 1`.
+const CHAIN_INFO_ARITY: [u8; 1] = [0];
+
+/// The arity of chain-info `id`, or `None` if it is not allocated.
+pub fn chain_info_arity(id: u8) -> Option<u8> {
+    CHAIN_INFO_ARITY.get((id as usize).checked_sub(1)?).copied()
+}
+
+/// A provider of chain-info values, bound to an [`ActiveConfig`] with
+/// [`ActiveConfig::with_chain_info`].
+///
+/// Implemented by the owner of the chain-derived state (the blockchain module).
+/// `read` answers `None` where the value is not available — no active chain, or
+/// a projection that is not complete at the evaluation anchor — and the reading
+/// program's tier then falls through, deterministically on every node.
+pub trait ChainInfoSource {
+    /// The value of chain-info `id` over `args`, or `None`.
+    fn read(&self, id: u8, args: &[u64]) -> Option<u64>;
+}
+
+/// The source of a handle with nothing bound: every read is declined.
+#[derive(Clone, Copy)]
+pub struct NoChainInfo;
+
+impl ChainInfoSource for NoChainInfo {
+    fn read(&self, _id: u8, _args: &[u64]) -> Option<u64> {
+        None
+    }
 }
 
 /// What the registry records about one parameter.
@@ -908,6 +952,7 @@ impl<Sink: ConfigChangeSink> ChainConfigTrait for ChainConfiguration<Sink> {
             // worse than no handle.
             view: ChainConfigBlockPayloadView::from_payload(self.retained_payload())?,
             commitment: self.commitment?,
+            chain_info: NoChainInfo,
         })
     }
 
@@ -968,7 +1013,11 @@ impl<Sink: ConfigChangeSink> ChainConfigTrait for ChainConfiguration<Sink> {
 /// is not retained (FR56). Because the last resolution tier is a constant,
 /// **every accessor on an obtained handle returns a value** — there is no
 /// not-available case to handle per parameter.
-pub struct ActiveConfig<'a> {
+///
+/// `C` is the chain-info source programs read through `GETCHAININFO`. A handle is
+/// obtained with [`NoChainInfo`] and bound with [`Self::with_chain_info`] by the
+/// caller that knows the evaluation anchor, so no accessor signature carries it.
+pub struct ActiveConfig<'a, C: ChainInfoSource = NoChainInfo> {
     /// The envelope, walked and validated **once** when the handle was acquired.
     /// Every accessor re-resolves against it, but none re-validates the framing:
     /// re-deriving the content boundary per accessor — twice per accessor, in
@@ -976,12 +1025,25 @@ pub struct ActiveConfig<'a> {
     /// information.
     view: ChainConfigBlockPayloadView<'a>,
     commitment: Commitment,
+    chain_info: C,
 }
 
-impl<'a> ActiveConfig<'a> {
+impl<'a, C: ChainInfoSource> ActiveConfig<'a, C> {
     /// Which FR8 commitment produced these values.
     pub fn commitment(&self) -> Commitment {
         self.commitment
+    }
+
+    /// This handle with `source` answering its programs' chain-info reads.
+    ///
+    /// Bind it where the evaluation anchor is known (specification §4.6 rule 4);
+    /// a handle left unbound declines every read.
+    pub fn with_chain_info<D: ChainInfoSource>(self, source: D) -> ActiveConfig<'a, D> {
+        ActiveConfig {
+            view: self.view,
+            commitment: self.commitment,
+            chain_info: source,
+        }
     }
 
     // -- Blockchain parameters --
@@ -1291,8 +1353,16 @@ impl<'a> ActiveConfig<'a> {
     }
 }
 
-impl VmHost for ActiveConfig<'_> {
+impl<C: ChainInfoSource> VmHost for ActiveConfig<'_, C> {
     fn call(&self, func_id: u16, selector: u8, args: &[u64], fuel: &mut Fuel) -> Option<u64> {
+        if func_id == HOST_READ_CHAIN_INFO {
+            // As for parameters, the declared count must match the registry's
+            // arity — the VM passes what the program claims and checks nothing.
+            if args.len() != chain_info_arity(selector)? as usize {
+                return None;
+            }
+            return self.chain_info.read(selector, args);
+        }
         if func_id != HOST_RESOLVE_CONFIG || !is_allocated(selector) {
             return None;
         }

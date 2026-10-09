@@ -1558,3 +1558,152 @@ fn discard_is_not_reported() {
 
     assert_eq!(module.sink.calls.get(), 1);
 }
+
+// -- Chain-info (Story 5.12) --
+
+/// A chain-info source answering the registered-node count with a fixed value.
+#[derive(Clone, Copy)]
+struct FixedNodeCount(u64);
+
+impl ChainInfoSource for FixedNodeCount {
+    fn read(&self, id: u8, args: &[u64]) -> Option<u64> {
+        match (id, args) {
+            (chain_info::REGISTERED_NODE_COUNT, []) => Some(self.0),
+            _ => None,
+        }
+    }
+}
+
+/// `GETCHAININFO 1, 0; PUSH_U16 1000; MUL; RET` — one second per registered node.
+const PER_NODE_SECOND: [u8; 8] = [
+    op::GETCHAININFO,
+    chain_info::REGISTERED_NODE_COUNT,
+    0,
+    op::PUSH_U16,
+    0xE8,
+    0x03,
+    op::MUL,
+    op::RET,
+];
+
+#[test]
+fn a_program_reads_the_bound_chain_info_source() {
+    let module = loaded(&[Entry::Bytecode(
+        parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS,
+        &PER_NODE_SECOND,
+    )]);
+    let config = module.active_configuration().expect("content is loaded");
+    let bound = config.with_chain_info(FixedNodeCount(12));
+    assert_eq!(bound.parent_recovery_min_emit_interval_ms(), 12_000);
+}
+
+#[test]
+fn an_unbound_handle_declines_chain_info_and_falls_back() {
+    let module = loaded(&[Entry::Bytecode(
+        parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS,
+        &PER_NODE_SECOND,
+    )]);
+    let config = module.active_configuration().expect("content is loaded");
+    assert_eq!(
+        config.parent_recovery_min_emit_interval_ms(),
+        10_000,
+        "no source bound: the program traps and the default applies"
+    );
+}
+
+#[test]
+fn a_chain_info_read_with_the_wrong_argument_count_is_declined() {
+    // Identifier 1 has arity 0; the program declares 1.
+    let program = [
+        op::PUSH_U8,
+        7,
+        op::GETCHAININFO,
+        chain_info::REGISTERED_NODE_COUNT,
+        1,
+        op::RET,
+    ];
+    let module = loaded(&[Entry::Bytecode(
+        parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS,
+        &program,
+    )]);
+    let config = module.active_configuration().expect("content is loaded");
+    let bound = config.with_chain_info(FixedNodeCount(12));
+    assert_eq!(bound.parent_recovery_min_emit_interval_ms(), 10_000);
+}
+
+#[test]
+fn an_unallocated_chain_info_identifier_is_declined() {
+    for id in [0u8, 2, 255] {
+        let program = [op::GETCHAININFO, id, 0, op::RET];
+        let module = loaded(&[Entry::Bytecode(
+            parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS,
+            &program,
+        )]);
+        let config = module.active_configuration().expect("content is loaded");
+        let bound = config.with_chain_info(FixedNodeCount(12));
+        assert_eq!(
+            bound.parent_recovery_min_emit_interval_ms(),
+            10_000,
+            "chain-info identifier {id} is not allocated"
+        );
+    }
+}
+
+#[test]
+fn getconfig_and_getchaininfo_mix_and_the_source_reaches_nested_evaluations() {
+    // ID 9 reads chain-info; ID 8 reads ID 9 through GETCONFIG and adds the node
+    // count again. The nested evaluation of ID 9 sees the same bound source.
+    let retry = [
+        op::GETCONFIG,
+        parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS,
+        0,
+        op::GETCHAININFO,
+        chain_info::REGISTERED_NODE_COUNT,
+        0,
+        op::ADD,
+        op::RET,
+    ];
+    let module = loaded(&[
+        Entry::Bytecode(
+            parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS,
+            &PER_NODE_SECOND,
+        ),
+        Entry::Bytecode(
+            parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS,
+            &retry,
+        ),
+    ]);
+    let config = module.active_configuration().expect("content is loaded");
+    let bound = config.with_chain_info(FixedNodeCount(3));
+    assert_eq!(
+        bound.parent_recovery_per_head_retry_interval_ms(),
+        3_000 + 3
+    );
+}
+
+#[test]
+fn a_chain_info_value_violating_its_bound_falls_to_the_next_tier() {
+    // vote_scale must be non-zero; one node minus one is zero.
+    let program = [
+        op::GETCHAININFO,
+        chain_info::REGISTERED_NODE_COUNT,
+        0,
+        op::PUSH_U8,
+        1,
+        op::SUB,
+        op::RET,
+    ];
+    let module = loaded(&[Entry::Bytecode(parameter::VOTE_SCALE, &program)]);
+    let config = module.active_configuration().expect("content is loaded");
+    assert_eq!(
+        config.with_chain_info(FixedNodeCount(1)).vote_scale().get(),
+        1000
+    );
+    let module = loaded(&[Entry::Bytecode(parameter::VOTE_SCALE, &program)]);
+    let config = module.active_configuration().expect("content is loaded");
+    assert_eq!(
+        config.with_chain_info(FixedNodeCount(5)).vote_scale().get(),
+        4,
+        "in bounds, the computed value is used"
+    );
+}
