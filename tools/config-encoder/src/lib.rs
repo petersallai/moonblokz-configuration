@@ -37,8 +37,8 @@ use std::fmt;
 
 use moonblokz_chain_types::ChainConfigPayloadBuilder;
 use moonblokz_configuration::{
-    BuildLimits, ChainConfigError, accept_content, limits_are_expressible, parameter,
-    parameter_spec,
+    BuildLimits, ChainConfigError, accept_content, chain_info_arity, limits_are_expressible,
+    parameter, parameter_spec,
 };
 use moonblokz_crypto::{Crypto, CryptoTrait, PRIVATE_KEY_SIZE};
 use moonblokz_vm_asm::assemble;
@@ -315,6 +315,20 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
         let comment = &raw[code.len()..];
         let mut rest = code;
 
+        // `@name` names a *parameter*. On a `GETCHAININFO` line it would be
+        // rewritten into a parameter identifier and then read as a chain-info
+        // identifier of the same number — a different space, silently.
+        let is_chain_info = strip_label(code.trim())
+            .split_whitespace()
+            .next()
+            .is_some_and(|mnemonic| mnemonic.eq_ignore_ascii_case("GETCHAININFO"));
+        if is_chain_info && code.contains('@') {
+            return Err(err(
+                line_no,
+                "GETCHAININFO takes a chain-info identifier; `@name` names a configuration parameter",
+            ));
+        }
+
         while let Some(at) = rest.find('@') {
             line.push_str(&rest[..at]);
             let after = &rest[at + 1..];
@@ -330,7 +344,7 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
         line.push_str(rest);
         line.push_str(comment);
 
-        check_getconfig_arity(line_no, &line)?;
+        check_host_call_arity(line_no, &line)?;
         resolved.push_str(&line);
         resolved.push('\n');
     }
@@ -338,12 +352,15 @@ fn resolve_references(body: &[&str], offset: usize) -> Result<String, EncodeErro
     Ok(resolved)
 }
 
-/// Refuses a `GETCONFIG` whose declared argument count contradicts the registry.
+/// Refuses a `GETCONFIG` or `GETCHAININFO` whose identifier is unallocated or
+/// whose declared argument count the host would decline — any count for a
+/// parameter, which takes none, and anything but the chain-info arity — and an
+/// `ARG`, which in a parameter program always traps.
 ///
 /// The host seam would decline such a call at runtime and the parameter would
 /// silently fall back to its default; catching it here is what turns that into a
 /// diagnostic naming the line.
-fn check_getconfig_arity(line_no: usize, line: &str) -> Result<(), EncodeError> {
+fn check_host_call_arity(line_no: usize, line: &str) -> Result<(), EncodeError> {
     // A label may precede an instruction on the same line (specification §7.2.4),
     // so the mnemonic is not always the first token. Missing that would silently
     // skip the check for a labelled `GETCONFIG` — and the program would then fall
@@ -354,9 +371,21 @@ fn check_getconfig_arity(line_no: usize, line: &str) -> Result<(), EncodeError> 
     let Some(mnemonic) = tokens.next() else {
         return Ok(());
     };
-    if !mnemonic.eq_ignore_ascii_case("GETCONFIG") {
+    if mnemonic.eq_ignore_ascii_case("ARG") {
+        return Err(err(
+            line_no,
+            "ARG: parameters take no arguments; read chain-info with GETCHAININFO instead",
+        ));
+    }
+    let chain_info = mnemonic.eq_ignore_ascii_case("GETCHAININFO");
+    if !chain_info && !mnemonic.eq_ignore_ascii_case("GETCONFIG") {
         return Ok(());
     }
+    let (name, space) = if chain_info {
+        ("GETCHAININFO", "chain-info registry")
+    } else {
+        ("GETCONFIG", "registry")
+    };
 
     let operands: Vec<&str> = code[code.find(mnemonic).unwrap_or(0) + mnemonic.len()..]
         .split(',')
@@ -365,7 +394,7 @@ fn check_getconfig_arity(line_no: usize, line: &str) -> Result<(), EncodeError> 
     if operands.len() != 2 {
         return Err(err(
             line_no,
-            "GETCONFIG takes a parameter identifier and an argument count",
+            format!("{name} takes an identifier and an argument count"),
         ));
     }
     let (Ok(id), Ok(argc)) = (parse_number(operands[0]), parse_number(operands[1])) else {
@@ -373,20 +402,31 @@ fn check_getconfig_arity(line_no: usize, line: &str) -> Result<(), EncodeError> 
         return Ok(());
     };
 
-    let Some(spec) = u8::try_from(id).ok().and_then(parameter_spec) else {
+    let arity = u8::try_from(id).ok().and_then(|id| {
+        if chain_info {
+            chain_info_arity(id)
+        } else {
+            // Parameters take no arguments (specification §4.5).
+            parameter_spec(id).map(|_| 0)
+        }
+    });
+    let Some(arity) = arity else {
         return Err(err(
             line_no,
-            format!("GETCONFIG names identifier {id}, which the registry does not allocate"),
+            format!("{name} names identifier {id}, which the {space} does not allocate"),
         ));
     };
-    if argc != spec.args as u64 {
-        return Err(err(
-            line_no,
+    if argc != arity as u64 {
+        let message = if chain_info {
             format!(
-                "GETCONFIG declares {argc} argument(s) for identifier {id}, but the registry records arity {}",
-                spec.args
-            ),
-        ));
+                "{name} declares {argc} argument(s) for identifier {id}, but the {space} records arity {arity}"
+            )
+        } else {
+            format!(
+                "{name} declares {argc} argument(s) for identifier {id}, but parameters take no arguments"
+            )
+        };
+        return Err(err(line_no, message));
     }
     Ok(())
 }
@@ -634,6 +674,64 @@ mod tests {
     }
 
     #[test]
+    fn a_program_may_read_chain_info() {
+        let module = loaded(
+            "parent_recovery_min_emit_interval_ms = {\n    GETCHAININFO 1, 0\n    PUSH 1000\n    MUL\n    RET\n}\n",
+        );
+        let config = module.active_configuration().expect("handle");
+        assert_eq!(
+            config.parent_recovery_min_emit_interval_ms(),
+            10_000,
+            "encoded and accepted; unbound here, so it falls back"
+        );
+    }
+
+    #[test]
+    fn a_getchaininfo_naming_an_unallocated_identifier_or_wrong_arity_is_refused() {
+        let error = encode(
+            "vote_interest = {\n    GETCHAININFO 9, 0\n    RET\n}\n",
+            KEY,
+        )
+        .expect_err("unallocated chain-info");
+        assert_eq!(error.line, 2);
+        assert!(
+            error
+                .message
+                .contains("chain-info registry does not allocate")
+        );
+
+        let error = encode(
+            "vote_interest = {\n    GETCHAININFO 1, 1\n    RET\n}\n",
+            KEY,
+        )
+        .expect_err("wrong arity");
+        assert_eq!(error.line, 2);
+        assert!(error.message.contains("records arity 0"));
+    }
+
+    #[test]
+    fn an_arg_in_a_parameter_program_is_refused() {
+        // Parameters take no arguments, so `ARG` would trap on every node.
+        let error = encode("registration_price = {\n    top: arg 0\n    RET\n}\n", KEY)
+            .expect_err("ARG always traps");
+        assert_eq!(error.line, 2);
+        assert!(error.message.contains("parameters take no arguments"));
+    }
+
+    #[test]
+    fn a_parameter_name_on_a_getchaininfo_line_is_refused() {
+        // `@inter_block_interval_ms` is parameter 1; read as chain-info it would
+        // silently be the registered-node count.
+        let error = encode(
+            "vote_interest = {\n    top: getchaininfo @inter_block_interval_ms, 0\n    RET\n}\n",
+            KEY,
+        )
+        .expect_err("@ names a parameter");
+        assert_eq!(error.line, 2);
+        assert!(error.message.contains("names a configuration parameter"));
+    }
+
+    #[test]
     fn a_getconfig_arity_that_contradicts_the_registry_is_refused() {
         let error = encode(
             "vote_interest = {\n    GETCONFIG @inter_block_interval_ms, 1\n    RET\n}\n",
@@ -641,7 +739,7 @@ mod tests {
         )
         .expect_err("identifier 1 is argument-less");
         assert_eq!(error.line, 2);
-        assert!(error.message.contains("arity 0"));
+        assert!(error.message.contains("parameters take no arguments"));
     }
 
     #[test]
@@ -749,7 +847,7 @@ mod tests {
         )
         .expect_err("identifier 1 is argument-less");
         assert_eq!(error.line, 2);
-        assert!(error.message.contains("arity 0"));
+        assert!(error.message.contains("parameters take no arguments"));
     }
 
     #[test]
