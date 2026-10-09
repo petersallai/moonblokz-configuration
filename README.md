@@ -17,14 +17,15 @@ module.load_tentative(chain_config_block.payload())?;   // accepts, then notifie
 
 if let Some(config) = module.active_configuration() {
     let interval = config.inter_block_interval_ms();
-    let price = config.registration_price(registered_nodes);
+    let price = config.registration_price();             // no arguments: inputs are the program's
+    let bound = config.with_chain_info(&source);          // chain-info for GETCHAININFO reads
 }
 
 module.promote_durable()?;                               // set-once, FR8
 ```
 
 - **`ChainConfiguration<Sink>`** — one retained `MAX_PAYLOAD_SIZE` buffer plus a commitment flag. Tentative and durable content are never two different values at once: promotion flips the flag over the same bytes.
-- **`ActiveConfig<'_>`** — the accessor surface, and the only way to read a value. It **borrows** the module, which makes FR56's no-caching rule structural: the handle cannot outlive the invocation that acquired it, nor be held across a state change. Availability is decided once, at acquisition, so `None` is answered per handle rather than per accessor.
+- **`ActiveConfig<'_>`** — the accessor surface, and the only way to read a value. Accessors take **no arguments**: a program reads other parameters through `GETCONFIG` and chain-derived quantities through `GETCHAININFO`, from a source the caller binds with `with_chain_info` (specification §4.6). It **borrows** the module, which makes FR56's no-caching rule structural: the handle cannot outlive the invocation that acquired it, nor be held across a state change. Availability is decided once, at acquisition, so `None` is answered per handle rather than per accessor.
 - **`accept_content`** — framing, registry conformance and the structural bounds, on the raw declared values, before anything is loaded. This is the only place an out-of-range declared value is still visible: past a narrowing accessor it cannot be told from a legal one.
 - **`ConfigChangeSink`** — a mandatory generic, so the no-op implementation optimises away and no runtime branch is paid per change. The transport (the firmware-side `Watch` carrying the radio snapshot) stays on the node side, which is what preserves the dependency gate.
 
@@ -35,8 +36,8 @@ module.promote_durable()?;                               // set-once, FR8
 - **Each tier that needs a budget gets a fresh one.** If a lower tier inherited an exhausted budget, then whenever exhaustion was the failure cause the tier below could never run. Sharing happens along the other axis: a nested `GETCONFIG` draws from the budget of the invocation that started it, so a program cannot evade the bound by composing sub-evaluations.
 - **Unknown keys are rejected, not skipped.** A node substituting its own default for a parameter it does not know would validate against different values than the rest of the network — a consensus split that produces no error anywhere. The consequence is deliberate: a chain's configuration content defines the minimum firmware capability required to participate, and a node older than a key the chain uses stays in collecting state. The rejection is distinguishable (`chain-config-unknown-key`, carrying the key byte) so the diagnosis reads *the node is out of date*.
 - **Narrowing is by saturation**, consistent with the VM's arithmetic. A parameter whose bound must hold for this node to *represent* the chain is not left to saturation: it is literal-only, so acceptance checks its declared value.
-- **Acceptance runs no program.** A program's result is only checkable ahead of time when it takes no arguments, so such a pass is partial by construction and grows more partial as the registry gains argument-taking parameters. A misbehaving program is covered completely by the resolution model instead — trap or exhausted budget, tier fails, fall through to the default and then the fallback literal, identically on every node. One total mechanism, not a partial one in front of it.
-- **The execution budget is downward-only.** A chain may declare a `vm_fuel_limit` at or below the code-baked default, never above it: the default is the one value grounded in a timing estimate, so a higher ceiling would be a bound no measurement supports. Acceptance also checks the declared limit *before* spending it, since it pays that budget once per argument-less program.
+- **Acceptance runs no program.** A program may read chain-info, which no acceptance-time context can supply, so such a pass would be partial by construction. A misbehaving program is covered completely by the resolution model instead — trap or exhausted budget, tier fails, fall through to the default and then the fallback literal, identically on every node. One total mechanism, not a partial one in front of it.
+- **The execution budget is downward-only.** A chain may declare a `vm_fuel_limit` at or below the code-baked default, never above it: the default is the one value grounded in a timing estimate, so a higher ceiling would be a bound no measurement supports. Acceptance also checks the declared limit before any other bound.
 - **The registry is permanent wire format.** Identifiers are allocated densely from 1 and are never reused or renumbered: FR7 requires the content signature to be invariant for the chain's lifetime and reproduced byte-identically in every FR49 replay block. **So are the defaults**, for a less obvious reason: a chain that omits a parameter validates against this build's default for it, so two firmware versions whose default tables differ by one value validate the same chain differently, with no error on either side. Changing a default is a consensus-breaking change, not a tuning decision.
 
 ## What is deliberately not here
@@ -52,10 +53,10 @@ The registry is permanent wire format, so an addition is examined against a chec
 
 1. The identifier, the declared width and the default are **all permanent** — a chain that omits a parameter validates against this build's default, so a default may never be derived from a build constant.
 2. **The bound decides the value form.** A *universal* limit (0, 1, 100, a wire-format constant) is enforced at acceptance on a declared literal and at resolution on a computed one, so the parameter may be `L/B`. A limit that is a *compile-time constant of this build* is enforced at acceptance only and the parameter must be `L` — refusing a chain cannot diverge, but a resolution-time fallback would leave this node participating with a different value than a differently-built node. If such a parameter must stay computable, have the **chain** declare the ceiling as a separate `L` parameter and clamp to it, the way `required_support` clamps to `max_aggregated_signatures`.
-3. **A bounded parameter takes no arguments** — no acceptance-time check covers every argument value.
+3. **No parameter takes arguments.** A chain-derived input is read through chain-info, so which inputs a value depends on is the program's decision, not the accessor's.
 4. **A relation between two parameters is not this module's to enforce.** Acceptance may check it on declared literals as a founder-facing diagnostic, but the consumer resolves an inconsistent pair at the point of use, deterministically; the module must not clamp one to the other, because choosing which value wins is the consumer's decision.
 
-Four of these are compile-time assertions, so the build catches a table edit that breaks them.
+Three of these are compile-time assertions, so the build catches a table edit that breaks them.
 
 ## Tooling
 
