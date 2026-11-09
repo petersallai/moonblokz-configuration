@@ -1611,7 +1611,7 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
 /// capacity — IDs 4, 21 and 30 — are literal-only: their limits are the caller's
 /// build's, so the decision has to stay at acceptance, where the answer is
 /// rejection rather than substitution. Their checks live in separate
-/// acceptance-only functions, so this one cannot reach them even by mistake. Every Every bound this function can reach is universal — 0, 1, 100, and
+/// acceptance-only functions, so this one cannot reach them even by mistake. Every bound this function can reach is universal — 0, 1, 100, and
 /// the block format's own `HEADER_SIZE` and `MAX_BLOCK_SIZE`. ID 10's ceiling was
 /// the one exception and is no longer here: it became a clamp against the chain's
 /// own declared value instead (see [`ActiveConfig::required_support`]).
@@ -1668,7 +1668,9 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
         // A percentage.
         parameter::BLOCK_FILL_THRESHOLD_PERCENT => declared <= 100,
         // A window has to hold at least one block. The capacity above it is the
-        // caller's, so it lives in `check_build_limit`.
+        // caller's, so it lives in `check_build_limit`. The effective floor is
+        // 2: no horizon fits below a one-block window (`1 ≤ H < W`, check 15 in
+        // `check_window_horizon`).
         parameter::ACTIVE_CHAIN_LENGTH => declared >= 1,
         // FR58: at zero no chain switch is admitted at all, not even to a sibling
         // of the head (§6 check 14). The relations to `W` and to the caller's
