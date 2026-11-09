@@ -45,9 +45,10 @@ use moonblokz_vm_asm::assemble;
 
 /// The build this tool encodes for.
 ///
-/// Two of the acceptance checks measure a declared value against a capacity of
+/// Three of the acceptance checks measure declared values against a capacity of
 /// the *node's* build rather than against anything universal (the per-block UTXO
-/// spent-bit width and the active-chain window), so "whatever this tool accepts,
+/// spent-bit width, the active-chain window, and the block storage that the window
+/// and the verification horizon must fit), so "whatever this tool accepts,
 /// the network accepts" is a statement about a particular build. These are the
 /// reference firmware's values, which is what a founder encoding for the standard
 /// build wants; content encoded here is accepted by any node whose capacities are
@@ -57,6 +58,7 @@ use moonblokz_vm_asm::assemble;
 const REFERENCE_BUILD_LIMITS: BuildLimits = BuildLimits {
     utxo_unspent_bits: 256,
     snake_chain_length_max: 500,
+    max_blocks: 600,
 };
 
 const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
@@ -70,7 +72,7 @@ const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
 /// together so they cannot drift.
 ///
 /// [`names_match_the_registry`]: #
-pub const NAMES: [(&str, u8); 29] = [
+pub const NAMES: [(&str, u8); 30] = [
     (
         "inter_block_interval_ms",
         parameter::INTER_BLOCK_INTERVAL_MS,
@@ -139,6 +141,7 @@ pub const NAMES: [(&str, u8); 29] = [
     ),
     ("replay_block_reward", parameter::REPLAY_BLOCK_REWARD),
     ("vm_fuel_limit", parameter::VM_FUEL_LIMIT),
+    ("verification_horizon", parameter::VERIFICATION_HORIZON),
 ];
 
 /// The registry identifier a name refers to.

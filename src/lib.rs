@@ -54,9 +54,10 @@ use moonblokz_vm::{Fuel, HOST_READ_CHAIN_INFO, HOST_RESOLVE_CONFIG, Vm, VmHost, 
 /// The per-build capacities a chain's declared values must fit inside, as the
 /// **caller** states them.
 ///
-/// Two of §6's bound checks measure a chain-declared value against a capacity of
-/// the *local build*: the per-block UTXO spent-bit width and the active-chain
-/// window. Both are const generics of `moonblokz-blockchain`, which depends on
+/// Three of §6's bound checks measure chain-declared values against a capacity of
+/// the *local build*: the per-block UTXO spent-bit width, the active-chain window,
+/// and the block-storage capacity. All three are const generics of
+/// `moonblokz-blockchain`, which depends on
 /// this crate and not the reverse, so this crate cannot read them — and it does
 /// not copy them either. The caller that owns them passes them in once, at
 /// construction, which makes drift between the two sides **unrepresentable**
@@ -64,8 +65,8 @@ use moonblokz_vm::{Fuel, HOST_READ_CHAIN_INFO, HOST_RESOLVE_CONFIG, Vm, VmHost, 
 /// `MAX_AGGREGATED_SIGNATURES` comes from `moonblokz-crypto`, which sits *below*
 /// this crate, so it is imported.
 ///
-/// Both checks are reachable only from acceptance, and structurally so: they live
-/// in a separate acceptance-only check, which the resolution guard never calls. That is the
+/// These checks are reachable only from acceptance, and structurally so: they live
+/// in separate acceptance-only checks, which the resolution guard never calls. That is the
 /// safety rule of §6 — a bound whose limit is a per-build constant must never be
 /// enforced by fallback, because a node that cannot honour the declared value has
 /// to reject the chain rather than keep participating with a different value than
@@ -93,6 +94,13 @@ pub struct BuildLimits {
     /// configuration, and a node whose capacity exceeds it simply uses part of
     /// what it allocated.
     pub snake_chain_length_max: u16,
+
+    /// Block-storage capacity of the local build (`MAX_BLOCKS`).
+    ///
+    /// The window `W`, the verification horizon `H` below it and one competing
+    /// branch of depth `H` must fit (FR58), so acceptance refuses a chain with
+    /// `W + 2·H` above this (§6 check 16).
+    pub max_blocks: u16,
 }
 
 /// Whether `limits` leaves a bound violation expressible in the declared width of
@@ -107,6 +115,10 @@ pub struct BuildLimits {
 /// state `max_block_utxo_output` was in while it was one byte wide against a
 /// 256-bit capacity.
 ///
+/// `max_blocks` needs no relation here: it bounds `W + 2·H`, and a `u16`
+/// capacity can never reach the largest sum the two parameters' widths can
+/// frame, so a violation of check 16 is always expressible.
+///
 /// Assert it where the capacities are stated, so that widening a capacity or
 /// narrowing a width fails the build:
 ///
@@ -116,6 +128,7 @@ pub struct BuildLimits {
 /// const LIMITS: BuildLimits = BuildLimits {
 ///     utxo_unspent_bits: 256,
 ///     snake_chain_length_max: 500,
+///     max_blocks: 600,
 /// };
 /// const _: () = assert!(limits_are_expressible(LIMITS));
 /// ```
@@ -138,7 +151,7 @@ const fn ceiling_fits(id: u8, ceiling: u64) -> bool {
 
 /// Declared width of the radio scoring matrix, the one array-typed parameter.
 ///
-/// Unlike the two capacities in [`BuildLimits`] this is not a
+/// Unlike the capacities in [`BuildLimits`] this is not a
 /// per-build capacity the chain's value must fit inside — it is the registry's
 /// own declared width, and so permanent wire format like every other width
 /// (specification §4.5 rule 2). It carries a name only because the accessor
@@ -216,7 +229,7 @@ type ConfigVm = Vm<VM_STACK_DEPTH, VM_LOCAL_SLOTS, VM_MAX_NESTING>;
 /// is the same silent split the unknown-key rule exists to prevent. Changing a
 /// value in the table below is a consensus-breaking change, not a tuning decision.
 ///
-/// **Next free identifier: 30.** Allocating one is governed by specification §4.5,
+/// **Next free identifier: 31.** Allocating one is governed by specification §4.5,
 /// which is a checklist rather than advice: the identifier, the width and the
 /// default are all permanent, the *bound* decides the value form (and a bound
 /// measured against a constant of this build forces literal-only), a bounded
@@ -294,6 +307,10 @@ pub mod parameter {
 
     /// Fuel budget of one program evaluation. Literal-only by rule.
     pub const VM_FUEL_LIMIT: u8 = 29;
+
+    /// FR58 verification horizon `H`: `1 ≤ H < W`, and `W + 2·H` within the
+    /// caller's [`crate::BuildLimits::max_blocks`]. Literal-only.
+    pub const VERIFICATION_HORIZON: u8 = 30;
 }
 
 /// The chain-info space (specification §4.6): quantities a program may read from
@@ -423,7 +440,7 @@ const fn spec_of_program(
 
 /// The registry, in identifier order. See [`parameter`] for the identifiers and
 /// the wire-format rules that govern them.
-const REGISTRY: [ParameterSpec; 29] = [
+const REGISTRY: [ParameterSpec; 30] = [
     spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, true, 60_000),
     spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, true, 30_000),
     spec_of(parameter::BLOCK_SIZE_LIMIT, 2, false, 2016),
@@ -482,6 +499,7 @@ const REGISTRY: [ParameterSpec; 29] = [
     ),
     spec_of(parameter::REPLAY_BLOCK_REWARD, 8, true, 100),
     spec_of(parameter::VM_FUEL_LIMIT, 4, false, 20_000),
+    spec_of(parameter::VERIFICATION_HORIZON, 2, false, 50),
 ];
 
 // Identifiers are allocated densely from 1, so the record for an identifier sits
@@ -514,16 +532,26 @@ pub const PARAMETER_COUNT: usize = REGISTRY.len();
 /// with a *different value* than a differently-built node resolves, with no error
 /// on either side. Admitting a program here would put the bound on the resolution
 /// path, so the form is the enforcement.
-const PER_BUILD_LIMITED_IDS: [u8; 3] = [
+const PER_BUILD_LIMITED_IDS: [u8; 4] = [
     parameter::MAX_BLOCK_UTXO_OUTPUT,
     parameter::MAX_AGGREGATED_SIGNATURES,
     parameter::ACTIVE_CHAIN_LENGTH,
+    parameter::VERIFICATION_HORIZON,
 ];
 
 const _: () = {
     let mut index = 0;
     while index < PER_BUILD_LIMITED_IDS.len() {
-        assert!(!REGISTRY[PER_BUILD_LIMITED_IDS[index] as usize - 1].bytecode_allowed);
+        let spec = &REGISTRY[PER_BUILD_LIMITED_IDS[index] as usize - 1];
+        assert!(!spec.bytecode_allowed);
+        // A literal default equal to the fallback, so the fallback acceptance
+        // measures for an absent entry is exactly the value resolution returns.
+        match &spec.default {
+            DefaultValue::Literal(value) => assert!(*value == spec.fallback),
+            DefaultValue::Program(_) => {
+                panic!("a per-build-limited parameter needs a literal default")
+            }
+        }
         index += 1;
     }
 };
@@ -531,9 +559,11 @@ const _: () = {
 /// The identifiers whose ceiling is a capacity the **caller** supplies, and which
 /// [`check_build_limit`] therefore constrains.
 ///
-/// A subset of [`PER_BUILD_LIMITED_IDS`]: that list's third member,
-/// `max_aggregated_signatures`, is measured against a constant this crate imports
-/// rather than against a [`BuildLimits`] field, so its arm stays in [`check_bound`].
+/// A subset of [`PER_BUILD_LIMITED_IDS`]. Two of that list's members are not here:
+/// `max_aggregated_signatures` is measured against a constant this crate imports
+/// rather than against a [`BuildLimits`] field, so its arm stays in [`check_bound`];
+/// `verification_horizon` is bounded only together with `active_chain_length`, so
+/// its checks live in the two-parameter [`check_window_horizon`].
 ///
 /// The point of naming the subset is that one list then drives both the checks and
 /// the assertions. The assertion below requires each entry to be literal-only — a
@@ -557,16 +587,9 @@ const _: () = {
         // Literal-only, for the reason `PER_BUILD_LIMITED_IDS` gives.
         assert!(!REGISTRY[id as usize - 1].bytecode_allowed);
         // And listed there too, so the category this crate documents stays whole
-        // when a caller-limited parameter is added.
+        // when a caller-limited parameter is added. That list's loop also pins the
+        // literal default the absent-entry measurement relies on.
         assert!(is_per_build_limited(id));
-        // A literal default equal to the fallback, so the fallback acceptance
-        // measures for an absent entry is exactly the value resolution returns.
-        match &REGISTRY[id as usize - 1].default {
-            DefaultValue::Literal(value) => assert!(*value == REGISTRY[id as usize - 1].fallback),
-            DefaultValue::Program(_) => {
-                panic!("a caller-limited parameter needs a literal default")
-            }
-        }
         index += 1;
     }
 };
@@ -584,8 +607,8 @@ const fn is_per_build_limited(id: u8) -> bool {
 }
 
 // `MAX_AGGREGATED_SIGNATURES` is the one per-build ceiling this crate can see, so
-// it is the one whose expressibility this crate can pin. The other two travel in
-// `BuildLimits` and are the caller's to pin, with `limits_are_expressible`.
+// it is the one whose expressibility this crate can pin. The caller's capacities
+// travel in `BuildLimits` and are the caller's to pin, with `limits_are_expressible`.
 const _: () = assert!(ceiling_fits(
     parameter::MAX_AGGREGATED_SIGNATURES,
     MAX_AGGREGATED_SIGNATURES as u64
@@ -1099,6 +1122,16 @@ impl<'a> ActiveConfig<'a> {
         narrow_u16(self.resolve(parameter::ACTIVE_CHAIN_LENGTH))
     }
 
+    /// FR58 verification horizon `H`.
+    ///
+    /// Its relation to [`active_chain_length`](Self::active_chain_length),
+    /// `H < W`, and the storage bound `W + 2·H ≤`
+    /// [`crate::BuildLimits::max_blocks`] are upheld at acceptance: both
+    /// parameters are literal-only, so the accepted values are the resolved ones.
+    pub fn verification_horizon(&self) -> u16 {
+        narrow_u16(self.resolve(parameter::VERIFICATION_HORIZON))
+    }
+
     /// FR56 mempool replenishment interval, milliseconds.
     ///
     /// `u32` is ample: it carries 49 days of milliseconds against a default of
@@ -1417,7 +1450,7 @@ fn narrow_u32(value: u64) -> u32 {
 /// 2. **Registry conformance**: identifier allocated, literal width exact,
 ///    bytecode only where the registry permits it.
 /// 3. **Declared literals**: the structural bounds, on the values the content
-///    states outright, plus the one invariant that spans two parameters.
+///    states outright, plus the invariants that span two parameters.
 ///
 /// **No program is run here.** A program may read chain-info, which no
 /// acceptance-time context can supply, so checking results ahead of time would be
@@ -1468,7 +1501,8 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
     // What that leaves uncovered is bounded by the registry's own value forms.
     // Every parameter whose bound must hold for the local node to *represent* the
     // chain at all — the spent-bit width, the active-chain capacity, the
-    // aggregation ceiling, the vote denominator, the execution budget — is
+    // verification horizon, the aggregation ceiling, the vote denominator, the
+    // execution budget — is
     // literal-only, so its declared value is checked below. The two bounded
     // parameters that do admit a program (`block_size_limit`,
     // `block_fill_threshold_percent`) can only be driven out of range into a
@@ -1478,6 +1512,8 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
     // consensus split and not a representation failure.
     let mut tx_fee_min = None;
     let mut tx_fee_max = None;
+    let mut window = None;
+    let mut horizon = None;
     // Bit `i` is set when the content declares `CALLER_LIMITED_IDS[i]`.
     let mut caller_limited_declared = 0u8;
 
@@ -1489,8 +1525,8 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
         let declared = read_le(entry.value());
 
         check_bound(spec.id, declared)?;
-        // The two checks measured against a capacity of the local build. They are
-        // applied here and nowhere else: `bounded`, the resolution-time guard,
+        // The single-parameter checks measured against a capacity of the local
+        // build. They are applied here and nowhere else: `bounded`, the resolution-time guard,
         // cannot reach them, which is the §6 safety rule made structural rather
         // than asserted.
         check_build_limit(spec.id, declared, limits)?;
@@ -1501,6 +1537,8 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
         match spec.id {
             parameter::TX_FEE_PER_BYTE_MIN => tx_fee_min = Some(declared),
             parameter::TX_FEE_PER_BYTE_MAX => tx_fee_max = Some(declared),
+            parameter::ACTIVE_CHAIN_LENGTH => window = Some(declared),
+            parameter::VERIFICATION_HORIZON => horizon = Some(declared),
             _ => {}
         }
     }
@@ -1518,21 +1556,29 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
         }
     }
 
-    // Pass 3 — the one invariant that spans two parameters, and therefore cannot
-    // live in a per-parameter check. A parameter absent from the content — or
+    // Pass 3 — the invariants that span two parameters, and therefore cannot live
+    // in a per-parameter check. A parameter absent from the content — or
     // overridden by a program, whose result is not knowable here — contributes its
     // code-baked default, which is the value resolution falls back to.
-    //
-    // This is a founder-facing diagnostic, not a guarantee: `config-encoder` runs
+    let declared_or_default = |declared: Option<u64>, id: u8| match declared {
+        Some(value) => value,
+        None => spec(id).fallback,
+    };
+
+    // §6 checks 15 and 16. Both parameters are literal-only, so these values are
+    // exactly the ones the chain resolves and the checks are total.
+    check_window_horizon(
+        declared_or_default(window, parameter::ACTIVE_CHAIN_LENGTH),
+        declared_or_default(horizon, parameter::VERIFICATION_HORIZON),
+        limits,
+    )?;
+
+    // The fee range is a founder-facing diagnostic, not a guarantee: `config-encoder` runs
     // this pass, so a typo in two declared literals is caught before a chain
     // exists. It cannot be a guarantee, because a computed fee is unknowable here
     // and the relation cannot be enforced at resolution either — a per-parameter
     // guard sees one value. Ratified 2026-08-18: the consumer resolves an
     // inconsistent range at the point of use, and the accessors say so.
-    let declared_or_default = |declared: Option<u64>, id: u8| match declared {
-        Some(value) => value,
-        None => spec(id).fallback,
-    };
     if declared_or_default(tx_fee_min, parameter::TX_FEE_PER_BYTE_MIN)
         > declared_or_default(tx_fee_max, parameter::TX_FEE_PER_BYTE_MAX)
     {
@@ -1561,11 +1607,11 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
 /// keeps the node participating with a *different value*, so if two builds
 /// disagreed about the bound they would disagree about the value, with no error on
 /// either side. Every bound reachable from here must therefore hold identically on
-/// every build. That is why the two parameters bounded by a [`BuildLimits`]
-/// capacity — IDs 4 and 21 — are literal-only: their limits are the caller's
+/// every build. That is why the parameters bounded by a [`BuildLimits`]
+/// capacity — IDs 4, 21 and 30 — are literal-only: their limits are the caller's
 /// build's, so the decision has to stay at acceptance, where the answer is
-/// rejection rather than substitution. Their checks live in a separate
-/// acceptance-only function, so this one cannot reach them even by mistake. Every bound this function can reach is universal — 0, 1, 100, and
+/// rejection rather than substitution. Their checks live in separate
+/// acceptance-only functions, so this one cannot reach them even by mistake. Every Every bound this function can reach is universal — 0, 1, 100, and
 /// the block format's own `HEADER_SIZE` and `MAX_BLOCK_SIZE`. ID 10's ceiling was
 /// the one exception and is no longer here: it became a clamp against the chain's
 /// own declared value instead (see [`ActiveConfig::required_support`]).
@@ -1584,9 +1630,9 @@ fn bounded(id: u8, value: u64) -> Option<u64> {
 /// and again at resolution on a computed value, with the same predicate, so a
 /// parameter bounded here may admit a program. A parameter with no bound passes.
 ///
-/// The two ceilings that belong to the *caller's* build live in
-/// [`check_build_limit`] instead, which is what keeps them off the resolution
-/// path.
+/// The ceilings that belong to the *caller's* build live in [`check_build_limit`]
+/// and [`check_window_horizon`] instead, which is what keeps them off the
+/// resolution path.
 fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
     let within = match id {
         // FR8: at zero no transaction output could ever be included in a block.
@@ -1624,6 +1670,10 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
         // A window has to hold at least one block. The capacity above it is the
         // caller's, so it lives in `check_build_limit`.
         parameter::ACTIVE_CHAIN_LENGTH => declared >= 1,
+        // FR58: at zero no chain switch is admitted at all, not even to a sibling
+        // of the head (§6 check 14). The relations to `W` and to the caller's
+        // storage live in `check_window_horizon`.
+        parameter::VERIFICATION_HORIZON => declared >= 1,
         // The budget every evaluation is bounded by. At zero every program silently
         // resolves to its default with no diagnostic anywhere; unbounded above, a
         // single content could hold the core for as long as it asked.
@@ -1638,7 +1688,8 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
     }
 }
 
-/// The two bounds measured against a capacity of the **caller's** build.
+/// The single-parameter bounds measured against a capacity of the **caller's**
+/// build.
 ///
 /// Separate from [`check_bound`] for a reason that is not tidiness: these are the
 /// checks §6 forbids enforcing by fallback, because a node that cannot honour a
@@ -1667,6 +1718,27 @@ fn check_build_limit(id: u8, declared: u64, limits: BuildLimits) -> Result<(), C
         Ok(())
     } else {
         Err(ChainConfigError::BoundViolation(id))
+    }
+}
+
+/// §6 checks 15 and 16, on the resolved window `w` and horizon `h`.
+///
+/// - **15, `h < w`:** at `h = w`, FR58's switch bound would admit a common
+///   ancestor one block below the window, which the in-place walk cannot take.
+/// - **16, `w + 2·h ≤ max_blocks`:** the window, the horizon and one competing
+///   branch of depth `h` must fit the caller's block storage.
+///
+/// Acceptance-only, like [`check_build_limit`]: check 16 measures the caller's
+/// build, and the resolution guard has no `BuildLimits` to reach it with. Both
+/// parameters are literal-only, so the values here are the ones the chain
+/// resolves. A violation names the horizon, the parameter both checks constrain.
+fn check_window_horizon(w: u64, h: u64, limits: BuildLimits) -> Result<(), ChainConfigError> {
+    if h < w && w + 2 * h <= limits.max_blocks as u64 {
+        Ok(())
+    } else {
+        Err(ChainConfigError::BoundViolation(
+            parameter::VERIFICATION_HORIZON,
+        ))
     }
 }
 
