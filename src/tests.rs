@@ -41,6 +41,7 @@ enum Entry<'a> {
 const TEST_LIMITS: BuildLimits = BuildLimits {
     utxo_unspent_bits: 256,
     snake_chain_length_max: 500,
+    max_blocks: 600,
 };
 
 const _: () = assert!(limits_are_expressible(TEST_LIMITS));
@@ -88,6 +89,23 @@ fn frame_raw(count: u16, body: &[u8]) -> Payload {
         bytes,
         len: 2 + body.len() + SIGNATURE_SIZE,
     }
+}
+
+/// A content declaring the window `w` and the horizon `h`, each only when given.
+fn window_and_horizon(w: Option<u16>, h: Option<u16>) -> Payload {
+    let w_bytes = w.unwrap_or(0).to_le_bytes();
+    let h_bytes = h.unwrap_or(0).to_le_bytes();
+    let both = [
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &w_bytes),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &h_bytes),
+    ];
+    let declared: &[Entry<'_>] = match (w.is_some(), h.is_some()) {
+        (true, true) => &both,
+        (true, false) => &both[..1],
+        (false, true) => &both[1..],
+        (false, false) => &[],
+    };
+    frame(declared)
 }
 
 fn loaded(entries: &[Entry<'_>]) -> ChainConfiguration<NoopConfigChangeSink> {
@@ -177,6 +195,9 @@ fn empty_override_set_resolves_every_default() {
 
     // VM parameters.
     assert_eq!(config.vm_fuel_limit(), 20_000);
+
+    // FR58 verification horizon.
+    assert_eq!(config.verification_horizon(), 50);
 }
 
 #[test]
@@ -771,12 +792,23 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
         ))
     ));
 
-    // A window has to hold at least one block.
-    let at_one = frame(&[Entry::Literal(
-        parameter::ACTIVE_CHAIN_LENGTH,
-        &1u16.to_le_bytes(),
-    )]);
-    assert!(accept_content(at_one.as_slice()).is_ok());
+    // A window of one block admits no horizon: `1 ≤ H < W` is empty (§6 check
+    // 15), so the content is refused whatever `H` it declares.
+    for h in [None, Some(1u16)] {
+        let at_one = window_and_horizon(Some(1), h);
+        assert!(matches!(
+            accept_content(at_one.as_slice()),
+            Err(ChainConfigError::BoundViolation(
+                parameter::VERIFICATION_HORIZON
+            ))
+        ));
+    }
+    // The smallest acceptable window holds one horizon block below it.
+    let at_two = frame(&[
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &2u16.to_le_bytes()),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &1u16.to_le_bytes()),
+    ]);
+    assert!(accept_content(at_two.as_slice()).is_ok());
 
     let zero = frame(&[Entry::Literal(
         parameter::ACTIVE_CHAIN_LENGTH,
@@ -819,6 +851,7 @@ fn every_caller_limited_identifier_is_constrained() {
     let none = BuildLimits {
         utxo_unspent_bits: 0,
         snake_chain_length_max: 0,
+        max_blocks: 0,
     };
     for id in CALLER_LIMITED_IDS {
         assert!(
@@ -906,6 +939,7 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
     let at_defaults = BuildLimits {
         utxo_unspent_bits: 255,
         snake_chain_length_max: 500,
+        max_blocks: 600,
     };
     assert!(super::accept_content(empty.as_slice(), at_defaults).is_ok());
 
@@ -926,11 +960,67 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
         Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &499u16.to_le_bytes()),
         Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &254u16.to_le_bytes()),
     ]);
+    // `W = 499` with the default `H = 50` needs `499 + 2·50` blocks of storage.
     let small_build = BuildLimits {
         utxo_unspent_bits: 254,
         snake_chain_length_max: 499,
+        max_blocks: 599,
     };
     assert!(super::accept_content(fits_both.as_slice(), small_build).is_ok());
+}
+
+#[test]
+fn verification_horizon_is_bounded_by_the_window_and_the_block_storage() {
+    let declared = window_and_horizon;
+    let refused = |payload: &[u8], limits: BuildLimits| {
+        matches!(
+            super::accept_content(payload, limits),
+            Err(ChainConfigError::BoundViolation(
+                parameter::VERIFICATION_HORIZON
+            ))
+        )
+    };
+
+    // Check 14: `H ≥ 1`, and the resolution guard holds the same floor.
+    assert!(refused(declared(None, Some(0)).as_slice(), TEST_LIMITS));
+    assert!(check_bound(parameter::VERIFICATION_HORIZON, 0).is_err());
+    assert!(check_bound(parameter::VERIFICATION_HORIZON, 1).is_ok());
+
+    // Check 15: `H < W` (DEC-207). `H = W − 1` holds; `H = W` does not.
+    assert!(super::accept_content(declared(Some(100), Some(99)).as_slice(), TEST_LIMITS).is_ok());
+    assert!(refused(
+        declared(Some(100), Some(100)).as_slice(),
+        TEST_LIMITS
+    ));
+    // An absent `H` is measured by its default: 50 is not below a window of 50.
+    assert!(refused(declared(Some(50), None).as_slice(), TEST_LIMITS));
+    assert!(super::accept_content(declared(Some(51), None).as_slice(), TEST_LIMITS).is_ok());
+
+    // Check 16: `W + 2·H ≤ max_blocks`, declared and absent alike. The defaults
+    // (500 + 2·50) fill the reference build exactly.
+    let one_short = BuildLimits {
+        max_blocks: 599,
+        ..TEST_LIMITS
+    };
+    let empty = frame(&[]);
+    assert!(super::accept_content(empty.as_slice(), TEST_LIMITS).is_ok());
+    assert!(refused(empty.as_slice(), one_short));
+    let at_capacity = declared(Some(400), Some(100));
+    assert!(super::accept_content(at_capacity.as_slice(), TEST_LIMITS).is_ok());
+    let over_capacity = declared(Some(400), Some(101));
+    assert!(refused(over_capacity.as_slice(), TEST_LIMITS));
+    assert!(super::accept_content(declared(Some(401), Some(99)).as_slice(), one_short).is_ok());
+    assert!(refused(declared(Some(402), Some(99)).as_slice(), one_short));
+
+    // The accessor reads a declared value back.
+    let module = loaded(&[
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &8u16.to_le_bytes()),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &3u16.to_le_bytes()),
+    ]);
+    let config = module
+        .active_configuration()
+        .expect("content is loaded, so a handle is available");
+    assert_eq!(config.verification_horizon(), 3);
 }
 
 #[test]
