@@ -1007,6 +1007,27 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
     assert!(super::accept_content(fits_both.as_slice(), small_build).is_ok());
 }
 
+/// A capacity at the top of its parameter's four-byte width would make a
+/// violation unframable, so `limits_are_expressible` must refuse it — for the
+/// block buffer and the node capacity alike (Story 6.15).
+#[test]
+fn a_capacity_at_the_top_of_its_width_is_not_expressible() {
+    assert!(limits_are_expressible(TEST_LIMITS));
+    assert!(!limits_are_expressible(BuildLimits {
+        block_size_max: u32::MAX,
+        ..TEST_LIMITS
+    }));
+    assert!(!limits_are_expressible(BuildLimits {
+        node_count_max: u32::MAX,
+        ..TEST_LIMITS
+    }));
+    assert!(limits_are_expressible(BuildLimits {
+        block_size_max: u32::MAX - 1,
+        node_count_max: u32::MAX - 1,
+        ..TEST_LIMITS
+    }));
+}
+
 /// DEC-228: the network's node cap is chain parameter ID 32, floored at 1 (§6
 /// check 17, universal) and capped by the build's node capacity (check 18).
 #[test]
