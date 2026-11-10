@@ -43,6 +43,7 @@ const TEST_LIMITS: BuildLimits = BuildLimits {
     snake_chain_length_max: 500,
     max_blocks: 600,
     block_size_max: MAX_BLOCK_SIZE as u32,
+    node_count_max: 1000,
 };
 
 const _: () = assert!(limits_are_expressible(TEST_LIMITS));
@@ -196,6 +197,7 @@ fn empty_override_set_resolves_every_default() {
 
     // VM parameters.
     assert_eq!(config.vm_fuel_limit(), 20_000);
+    assert_eq!(config.max_node_count(), 1000);
 
     // FR58 verification horizon.
     assert_eq!(config.verification_horizon(), 50);
@@ -883,6 +885,7 @@ fn every_caller_limited_identifier_is_constrained() {
         snake_chain_length_max: 0,
         max_blocks: 0,
         block_size_max: 0,
+        node_count_max: 0,
     };
     for id in CALLER_LIMITED_IDS {
         assert!(
@@ -972,6 +975,7 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
         snake_chain_length_max: 500,
         max_blocks: 600,
         block_size_max: 2016,
+        node_count_max: 1000,
     };
     assert!(super::accept_content(empty.as_slice(), at_defaults).is_ok());
 
@@ -998,8 +1002,63 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
         snake_chain_length_max: 499,
         max_blocks: 599,
         block_size_max: 2016,
+        node_count_max: 1000,
     };
     assert!(super::accept_content(fits_both.as_slice(), small_build).is_ok());
+}
+
+/// DEC-228: the network's node cap is chain parameter ID 32, floored at 1 (§6
+/// check 17, universal) and capped by the build's node capacity (check 18).
+#[test]
+fn max_node_count_is_bounded_by_the_build_node_capacity() {
+    let cap = |n: u32| frame(&[Entry::Literal(parameter::MAX_NODE_COUNT, &n.to_le_bytes())]);
+    let refused = |payload: &[u8], limits: BuildLimits| {
+        matches!(
+            super::accept_content(payload, limits),
+            Err(ChainConfigError::BoundViolation(parameter::MAX_NODE_COUNT))
+        )
+    };
+    // Check 17, and the resolution guard holds the same floor.
+    assert!(refused(cap(0).as_slice(), TEST_LIMITS));
+    assert!(check_bound(parameter::MAX_NODE_COUNT, 0).is_err());
+    // Check 18: equal holds, one above is refused.
+    assert!(super::accept_content(cap(1000).as_slice(), TEST_LIMITS).is_ok());
+    assert!(refused(cap(1001).as_slice(), TEST_LIMITS));
+    // An absent cap is measured by its default, 1000.
+    let small_build = BuildLimits {
+        node_count_max: 999,
+        ..TEST_LIMITS
+    };
+    assert!(refused(frame(&[]).as_slice(), small_build));
+    assert!(super::accept_content(cap(999).as_slice(), small_build).is_ok());
+    // A bytecode entry is refused: the parameter is literal-only.
+    let program = frame(&[Entry::Bytecode(parameter::MAX_NODE_COUNT, &PUSH_41_PROGRAM)]);
+    assert!(super::accept_content(program.as_slice(), TEST_LIMITS).is_err());
+    // The accessor reads a declared value back.
+    let module = loaded(&[Entry::Literal(
+        parameter::MAX_NODE_COUNT,
+        &16u32.to_le_bytes(),
+    )]);
+    let config = module
+        .active_configuration()
+        .expect("content is loaded, so a handle is available");
+    assert_eq!(config.max_node_count(), 16);
+}
+
+/// ID 31 `grace_period_step_ms` is registered as a data row (Story 6.15) so
+/// the registry stays dense; it takes a literal and a program like ID 2.
+#[test]
+fn grace_period_step_is_registered_and_accepts_both_forms() {
+    let literal = frame(&[Entry::Literal(
+        parameter::GRACE_PERIOD_STEP_MS,
+        &600_000u32.to_le_bytes(),
+    )]);
+    assert!(accept_content(literal.as_slice()).is_ok());
+    let program = frame(&[Entry::Bytecode(
+        parameter::GRACE_PERIOD_STEP_MS,
+        &PUSH_41_PROGRAM,
+    )]);
+    assert!(accept_content(program.as_slice()).is_ok());
 }
 
 #[test]

@@ -60,6 +60,7 @@ const REFERENCE_BUILD_LIMITS: BuildLimits = BuildLimits {
     snake_chain_length_max: 500,
     max_blocks: 600,
     block_size_max: 2016,
+    node_count_max: 1000,
 };
 
 const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
@@ -73,7 +74,7 @@ const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
 /// together so they cannot drift.
 ///
 /// [`names_match_the_registry`]: #
-pub const NAMES: [(&str, u8); 30] = [
+pub const NAMES: [(&str, u8); 32] = [
     (
         "inter_block_interval_ms",
         parameter::INTER_BLOCK_INTERVAL_MS,
@@ -143,6 +144,8 @@ pub const NAMES: [(&str, u8); 30] = [
     ("replay_block_reward", parameter::REPLAY_BLOCK_REWARD),
     ("vm_fuel_limit", parameter::VM_FUEL_LIMIT),
     ("verification_horizon", parameter::VERIFICATION_HORIZON),
+    ("grace_period_step_ms", parameter::GRACE_PERIOD_STEP_MS),
+    ("max_node_count", parameter::MAX_NODE_COUNT),
 ];
 
 /// The registry identifier a name refers to.

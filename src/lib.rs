@@ -111,6 +111,14 @@ pub struct BuildLimits {
     /// acceptance pass rejects it (§6 check 5); a block above it is then a local
     /// refusal, never evidence (DEC-225).
     pub block_size_max: u32,
+
+    /// Node capacity of the local build (`MAX_NODES`): the slots of its
+    /// node-indexed arrays.
+    ///
+    /// The network's node cap is the chain's `max_node_count` (ID 32), a
+    /// consensus rule every node applies alike. A chain declaring more than this
+    /// cannot be represented, so the acceptance pass rejects it (§6 check 18).
+    pub node_count_max: u32,
 }
 
 /// Whether `limits` leaves a bound violation expressible in the declared width of
@@ -140,6 +148,7 @@ pub struct BuildLimits {
 ///     snake_chain_length_max: 500,
 ///     max_blocks: 600,
 ///     block_size_max: 2016,
+///     node_count_max: 1000,
 /// };
 /// const _: () = assert!(limits_are_expressible(LIMITS));
 /// ```
@@ -151,6 +160,7 @@ pub const fn limits_are_expressible(limits: BuildLimits) -> bool {
         parameter::ACTIVE_CHAIN_LENGTH,
         limits.snake_chain_length_max as u64,
     ) && ceiling_fits(parameter::BLOCK_SIZE_LIMIT, limits.block_size_max as u64)
+        && ceiling_fits(parameter::MAX_NODE_COUNT, limits.node_count_max as u64)
 }
 
 /// Whether a value one above `ceiling` is representable in `id`'s declared width.
@@ -240,7 +250,7 @@ type ConfigVm = Vm<VM_STACK_DEPTH, VM_LOCAL_SLOTS, VM_MAX_NESTING>;
 /// is the same silent split the unknown-key rule exists to prevent. Changing a
 /// value in the table below is a consensus-breaking change, not a tuning decision.
 ///
-/// **Next free identifier: 31.** Allocating one is governed by specification §4.5,
+/// **Next free identifier: 33.** Allocating one is governed by specification §4.5,
 /// which is a checklist rather than advice: the identifier, the width and the
 /// default are all permanent, the *bound* decides the value form (and a bound
 /// measured against a constant of this build forces literal-only), a bounded
@@ -323,6 +333,14 @@ pub mod parameter {
     /// FR58 verification horizon `H`: `1 ≤ H < W`, and `W + 2·H` within the
     /// caller's [`crate::BuildLimits::max_blocks`]. Literal-only.
     pub const VERIFICATION_HORIZON: u8 = 30;
+    /// FR47 grace-period step, milliseconds: the interval between later grace
+    /// expiries (DEC-203). Registered by Story 6.15 so the registry stays dense;
+    /// its accessor arrives with Story 8.5.
+    pub const GRACE_PERIOD_STEP_MS: u8 = 31;
+    /// The network's node cap (DEC-228): registered node ids are below it, and a
+    /// registration or balance block beyond it is exact evidence. Bounded by the
+    /// caller's [`crate::BuildLimits::node_count_max`]. Literal-only.
+    pub const MAX_NODE_COUNT: u8 = 32;
 }
 
 /// The chain-info space (specification §4.6): quantities a program may read from
@@ -452,7 +470,7 @@ const fn spec_of_program(
 
 /// The registry, in identifier order. See [`parameter`] for the identifiers and
 /// the wire-format rules that govern them.
-const REGISTRY: [ParameterSpec; 30] = [
+const REGISTRY: [ParameterSpec; 32] = [
     spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, true, 60_000),
     spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, true, 30_000),
     spec_of(parameter::BLOCK_SIZE_LIMIT, 4, false, 2016),
@@ -512,6 +530,8 @@ const REGISTRY: [ParameterSpec; 30] = [
     spec_of(parameter::REPLAY_BLOCK_REWARD, 8, true, 100),
     spec_of(parameter::VM_FUEL_LIMIT, 4, false, 20_000),
     spec_of(parameter::VERIFICATION_HORIZON, 4, false, 50),
+    spec_of(parameter::GRACE_PERIOD_STEP_MS, 4, true, 900_000),
+    spec_of(parameter::MAX_NODE_COUNT, 4, false, 1000),
 ];
 
 // Identifiers are allocated densely from 1, so the record for an identifier sits
@@ -544,12 +564,13 @@ pub const PARAMETER_COUNT: usize = REGISTRY.len();
 /// with a *different value* than a differently-built node resolves, with no error
 /// on either side. Admitting a program here would put the bound on the resolution
 /// path, so the form is the enforcement.
-const PER_BUILD_LIMITED_IDS: [u8; 5] = [
+const PER_BUILD_LIMITED_IDS: [u8; 6] = [
     parameter::BLOCK_SIZE_LIMIT,
     parameter::MAX_BLOCK_UTXO_OUTPUT,
     parameter::MAX_AGGREGATED_SIGNATURES,
     parameter::ACTIVE_CHAIN_LENGTH,
     parameter::VERIFICATION_HORIZON,
+    parameter::MAX_NODE_COUNT,
 ];
 
 const _: () = {
@@ -584,10 +605,11 @@ const _: () = {
 /// `every_caller_limited_identifier_is_constrained` drives a case per entry through
 /// [`check_build_limit`] in both directions, so the list and the function cannot
 /// drift apart: an entry with no arm fails, and an arm with no entry fails.
-const CALLER_LIMITED_IDS: [u8; 3] = [
+const CALLER_LIMITED_IDS: [u8; 4] = [
     parameter::BLOCK_SIZE_LIMIT,
     parameter::MAX_BLOCK_UTXO_OUTPUT,
     parameter::ACTIVE_CHAIN_LENGTH,
+    parameter::MAX_NODE_COUNT,
 ];
 
 const _: () = {
@@ -1148,6 +1170,13 @@ impl<'a> ActiveConfig<'a> {
         narrow_u32(self.resolve(parameter::VERIFICATION_HORIZON))
     }
 
+    /// The network's node cap (DEC-228): every registered node id is below it.
+    /// At most the caller's [`crate::BuildLimits::node_count_max`], upheld at
+    /// acceptance; literal-only, so the accepted value is the resolved one.
+    pub fn max_node_count(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::MAX_NODE_COUNT))
+    }
+
     /// FR56 mempool replenishment interval, milliseconds.
     ///
     /// `u32` is ample: it carries 49 days of milliseconds against a default of
@@ -1690,6 +1719,9 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
         // of the head (§6 check 14). The relations to `W` and to the caller's
         // storage live in `check_window_horizon`.
         parameter::VERIFICATION_HORIZON => declared >= 1,
+        // §6 check 17: node 0 always exists, so a cap of zero admits no chain.
+        // Universal; the ceiling is the caller's node capacity (check 18).
+        parameter::MAX_NODE_COUNT => declared >= 1,
         // The budget every evaluation is bounded by. At zero every program silently
         // resolves to its default with no diagnostic anywhere; unbounded above, a
         // single content could hold the core for as long as it asked.
@@ -1731,6 +1763,9 @@ fn check_build_limit(id: u8, declared: u64, limits: BuildLimits) -> Result<(), C
         // build allocated (DEC-225). A chain above it cannot be held, so the node
         // refuses it here; it never judges a block it could not frame.
         parameter::BLOCK_SIZE_LIMIT => declared <= limits.block_size_max as u64,
+        // §6 check 18: the chain's node cap must fit the node-indexed arrays this
+        // build allocated (DEC-228). Above it a registration would have no slot.
+        parameter::MAX_NODE_COUNT => declared <= limits.node_count_max as u64,
         _ => true,
     };
 
