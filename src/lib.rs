@@ -54,9 +54,9 @@ use moonblokz_vm::{Fuel, HOST_READ_CHAIN_INFO, HOST_RESOLVE_CONFIG, Vm, VmHost, 
 /// The per-build capacities a chain's declared values must fit inside, as the
 /// **caller** states them.
 ///
-/// Four of §6's bound checks measure chain-declared values against a capacity of
+/// Five of §6's bound checks measure chain-declared values against a capacity of
 /// the *local build*: the per-block UTXO spent-bit width, the active-chain window,
-/// the block-storage capacity and the block buffer. They are const generics or
+/// the block-storage capacity, the block buffer and the node capacity. They are const generics or
 /// build constants of `moonblokz-blockchain` (the block buffer is the
 /// `moonblokz-chain-types` size tier, DEC-220), which depends on
 /// this crate and not the reverse, so this crate cannot read them — and it does
@@ -1652,7 +1652,7 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
 /// disagreed about the bound they would disagree about the value, with no error on
 /// either side. Every bound reachable from here must therefore hold identically on
 /// every build. That is why the parameters bounded by a [`BuildLimits`]
-/// capacity — IDs 3, 4, 21 and 30 — are literal-only: their limits are the caller's
+/// capacity — IDs 3, 4, 21, 30 and 32 — are literal-only: their limits are the caller's
 /// build's, so the decision has to stay at acceptance, where the answer is
 /// rejection rather than substitution. Their checks live in separate
 /// acceptance-only functions, so this one cannot reach them even by mistake. Every bound this function can reach is universal — 0, 1, 100, and

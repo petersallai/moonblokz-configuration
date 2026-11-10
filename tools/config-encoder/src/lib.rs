@@ -45,9 +45,9 @@ use moonblokz_vm_asm::assemble;
 
 /// The build this tool encodes for.
 ///
-/// Four of the acceptance checks measure declared values against a capacity of
+/// Five of the acceptance checks measure declared values against a capacity of
 /// the *node's* build rather than against anything universal (the per-block UTXO
-/// spent-bit width, the active-chain window, the block buffer, and the block storage that the window
+/// spent-bit width, the active-chain window, the block buffer, the node capacity, and the block storage that the window
 /// and the verification horizon must fit), so "whatever this tool accepts,
 /// the network accepts" is a statement about a particular build. These are the
 /// reference firmware's values, which is what a founder encoding for the standard
@@ -794,6 +794,15 @@ mod tests {
         let error = encode("active_chain_length = 70000\n", KEY)
             .expect_err("over the reference build's window capacity");
         assert_eq!(error.line, 0);
+        assert!(error.message.contains("structural bound"));
+
+        // The block buffer and the node capacity of the reference build: at the
+        // capacity the content encodes, one above it is refused (IDs 3 and 32).
+        assert!(encode("block_size_limit = 2016\n", KEY).is_ok());
+        let error = encode("block_size_limit = 2017\n", KEY).expect_err("above the block buffer");
+        assert!(error.message.contains("structural bound"));
+        assert!(encode("max_node_count = 1000\n", KEY).is_ok());
+        let error = encode("max_node_count = 1001\n", KEY).expect_err("above the node capacity");
         assert!(error.message.contains("structural bound"));
 
         // Reading another parameter is legitimate and must still encode.

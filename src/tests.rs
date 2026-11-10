@@ -197,6 +197,8 @@ fn empty_override_set_resolves_every_default() {
 
     // VM parameters.
     assert_eq!(config.vm_fuel_limit(), 20_000);
+
+    // DEC-228 network node cap.
     assert_eq!(config.max_node_count(), 1000);
 
     // FR58 verification horizon.
@@ -782,7 +784,33 @@ fn block_size_limit_is_bounded_by_the_build_block_buffer() {
         &(4u32 * 1024 * 1024).to_le_bytes(),
     )]);
     assert!(super::accept_content(large.as_slice(), large_buffer).is_ok());
-    assert!(accept_content(large.as_slice()).is_err());
+    assert!(matches!(
+        accept_content(large.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::BLOCK_SIZE_LIMIT
+        ))
+    ));
+
+    // The `u32` extremes: a build stating the largest expressible capacities
+    // accepts a content declaring them.
+    let extreme_build = BuildLimits {
+        block_size_max: u32::MAX - 1,
+        snake_chain_length_max: u32::MAX - 1,
+        max_blocks: u32::MAX - 1,
+        node_count_max: u32::MAX - 1,
+        ..TEST_LIMITS
+    };
+    assert!(limits_are_expressible(extreme_build));
+    let extreme = frame(&[
+        Entry::Literal(parameter::BLOCK_SIZE_LIMIT, &(u32::MAX - 1).to_le_bytes()),
+        Entry::Literal(
+            parameter::ACTIVE_CHAIN_LENGTH,
+            &(u32::MAX - 201).to_le_bytes(),
+        ),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &100u32.to_le_bytes()),
+        Entry::Literal(parameter::MAX_NODE_COUNT, &(u32::MAX - 1).to_le_bytes()),
+    ]);
+    assert!(super::accept_content(extreme.as_slice(), extreme_build).is_ok());
 
     // The floor is universal (check 10): a limit that cannot admit a header
     // admits no block at all, and every remaining-capacity computation against
@@ -1054,7 +1082,12 @@ fn max_node_count_is_bounded_by_the_build_node_capacity() {
     assert!(super::accept_content(cap(999).as_slice(), small_build).is_ok());
     // A bytecode entry is refused: the parameter is literal-only.
     let program = frame(&[Entry::Bytecode(parameter::MAX_NODE_COUNT, &PUSH_41_PROGRAM)]);
-    assert!(super::accept_content(program.as_slice(), TEST_LIMITS).is_err());
+    assert!(matches!(
+        super::accept_content(program.as_slice(), TEST_LIMITS),
+        Err(ChainConfigError::BytecodeNotPermitted(
+            parameter::MAX_NODE_COUNT
+        ))
+    ));
     // The accessor reads a declared value back.
     let module = loaded(&[Entry::Literal(
         parameter::MAX_NODE_COUNT,
