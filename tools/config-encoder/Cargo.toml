@@ -20,7 +20,7 @@ path = "src/main.rs"
 # graph has to agree on one. `moonblokz-crypto`'s own default is a *different*
 # backend, so `default-features = false` is load-bearing — enabling two backends
 # does not build.
-moonblokz-configuration = { path = "../..", default-features = false, features = ["schnorr-crypto-bigint"] }
-moonblokz-chain-types = { path = "../../../moonblokz-chain-types", default-features = false, features = ["schnorr-crypto-bigint"] }
+moonblokz-configuration = { path = "../..", default-features = false, features = ["schnorr-crypto-bigint", "block-size-2016"] }
+moonblokz-chain-types = { path = "../../../moonblokz-chain-types", default-features = false, features = ["schnorr-crypto-bigint", "block-size-2016"] }
 moonblokz-crypto = { path = "../../../moonblokz-crypto-lib", default-features = false, features = ["schnorr-crypto-bigint"] }
 moonblokz-vm-asm = { path = "../../../moonblokz-vm/tools/vm-asm", default-features = false }

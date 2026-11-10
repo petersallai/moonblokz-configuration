@@ -6,7 +6,7 @@
 
 use core::cell::{Cell, RefCell};
 
-use moonblokz_chain_types::{CONFIG_KEY_BYTECODE_FLAG, ChainConfigPayloadBuilder};
+use moonblokz_chain_types::{CONFIG_KEY_BYTECODE_FLAG, ChainConfigPayloadBuilder, MAX_BLOCK_SIZE};
 use moonblokz_crypto::{Crypto, CryptoTrait, PRIVATE_KEY_SIZE, SIGNATURE_SIZE};
 use moonblokz_vm::opcode as op;
 
@@ -42,6 +42,8 @@ const TEST_LIMITS: BuildLimits = BuildLimits {
     utxo_unspent_bits: 256,
     snake_chain_length_max: 500,
     max_blocks: 600,
+    block_size_max: MAX_BLOCK_SIZE as u32,
+    node_count_max: 1000,
 };
 
 const _: () = assert!(limits_are_expressible(TEST_LIMITS));
@@ -92,7 +94,7 @@ fn frame_raw(count: u16, body: &[u8]) -> Payload {
 }
 
 /// A content declaring the window `w` and the horizon `h`, each only when given.
-fn window_and_horizon(w: Option<u16>, h: Option<u16>) -> Payload {
+fn window_and_horizon(w: Option<u32>, h: Option<u32>) -> Payload {
     let w_bytes = w.unwrap_or(0).to_le_bytes();
     let h_bytes = h.unwrap_or(0).to_le_bytes();
     let both = [
@@ -195,6 +197,9 @@ fn empty_override_set_resolves_every_default() {
 
     // VM parameters.
     assert_eq!(config.vm_fuel_limit(), 20_000);
+
+    // DEC-228 network node cap.
+    assert_eq!(config.max_node_count(), 1000);
 
     // FR58 verification horizon.
     assert_eq!(config.verification_horizon(), 50);
@@ -735,16 +740,18 @@ fn vote_scale_may_not_be_zero() {
 }
 
 #[test]
-fn block_size_limit_is_bounded_by_the_block_buffer() {
+fn block_size_limit_is_bounded_by_the_build_block_buffer() {
+    // §6 check 5 (DEC-225): the ceiling is the caller's `block_size_max`, a
+    // build capacity, so it lives in `check_build_limit`, off the resolution path.
     let at_bound = frame(&[Entry::Literal(
         parameter::BLOCK_SIZE_LIMIT,
-        &(MAX_BLOCK_SIZE as u16).to_le_bytes(),
+        &TEST_LIMITS.block_size_max.to_le_bytes(),
     )]);
     assert!(accept_content(at_bound.as_slice()).is_ok());
 
     let over = frame(&[Entry::Literal(
         parameter::BLOCK_SIZE_LIMIT,
-        &(MAX_BLOCK_SIZE as u16 + 1).to_le_bytes(),
+        &(TEST_LIMITS.block_size_max + 1).to_le_bytes(),
     )]);
     assert!(matches!(
         accept_content(over.as_slice()),
@@ -752,18 +759,71 @@ fn block_size_limit_is_bounded_by_the_block_buffer() {
             parameter::BLOCK_SIZE_LIMIT
         ))
     ));
+    assert!(check_bound(parameter::BLOCK_SIZE_LIMIT, u64::from(u32::MAX)).is_ok());
 
-    // A limit that cannot admit a header admits no block at all, and every
-    // remaining-capacity computation against it underflows.
+    // A build whose buffer is below the default refuses a content that leaves
+    // the limit undeclared: the chain resolves 2016, which it cannot hold.
+    let small_buffer = BuildLimits {
+        block_size_max: 2015,
+        ..TEST_LIMITS
+    };
+    assert!(matches!(
+        super::accept_content(frame(&[]).as_slice(), small_buffer),
+        Err(ChainConfigError::BoundViolation(
+            parameter::BLOCK_SIZE_LIMIT
+        ))
+    ));
+
+    // A larger build holds a limit above `u16` (DEC-227: four bytes wide).
+    let large_buffer = BuildLimits {
+        block_size_max: 4 * 1024 * 1024,
+        ..TEST_LIMITS
+    };
+    let large = frame(&[Entry::Literal(
+        parameter::BLOCK_SIZE_LIMIT,
+        &(4u32 * 1024 * 1024).to_le_bytes(),
+    )]);
+    assert!(super::accept_content(large.as_slice(), large_buffer).is_ok());
+    assert!(matches!(
+        accept_content(large.as_slice()),
+        Err(ChainConfigError::BoundViolation(
+            parameter::BLOCK_SIZE_LIMIT
+        ))
+    ));
+
+    // The `u32` extremes: a build stating the largest expressible capacities
+    // accepts a content declaring them.
+    let extreme_build = BuildLimits {
+        block_size_max: u32::MAX - 1,
+        snake_chain_length_max: u32::MAX - 1,
+        max_blocks: u32::MAX - 1,
+        node_count_max: u32::MAX - 1,
+        ..TEST_LIMITS
+    };
+    assert!(limits_are_expressible(extreme_build));
+    let extreme = frame(&[
+        Entry::Literal(parameter::BLOCK_SIZE_LIMIT, &(u32::MAX - 1).to_le_bytes()),
+        Entry::Literal(
+            parameter::ACTIVE_CHAIN_LENGTH,
+            &(u32::MAX - 201).to_le_bytes(),
+        ),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &100u32.to_le_bytes()),
+        Entry::Literal(parameter::MAX_NODE_COUNT, &(u32::MAX - 1).to_le_bytes()),
+    ]);
+    assert!(super::accept_content(extreme.as_slice(), extreme_build).is_ok());
+
+    // The floor is universal (check 10): a limit that cannot admit a header
+    // admits no block at all, and every remaining-capacity computation against
+    // it underflows.
     let above_header = frame(&[Entry::Literal(
         parameter::BLOCK_SIZE_LIMIT,
-        &(HEADER_SIZE as u16 + 1).to_le_bytes(),
+        &(HEADER_SIZE as u32 + 1).to_le_bytes(),
     )]);
     assert!(accept_content(above_header.as_slice()).is_ok());
 
     let at_header = frame(&[Entry::Literal(
         parameter::BLOCK_SIZE_LIMIT,
-        &(HEADER_SIZE as u16).to_le_bytes(),
+        &(HEADER_SIZE as u32).to_le_bytes(),
     )]);
     assert!(matches!(
         accept_content(at_header.as_slice()),
@@ -794,7 +854,7 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
 
     // A window of one block admits no horizon: `1 ≤ H < W` is empty (§6 check
     // 15), so the content is refused whatever `H` it declares.
-    for h in [None, Some(1u16)] {
+    for h in [None, Some(1u32)] {
         let at_one = window_and_horizon(Some(1), h);
         assert!(matches!(
             accept_content(at_one.as_slice()),
@@ -805,14 +865,14 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
     }
     // The smallest acceptable window holds one horizon block below it.
     let at_two = frame(&[
-        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &2u16.to_le_bytes()),
-        Entry::Literal(parameter::VERIFICATION_HORIZON, &1u16.to_le_bytes()),
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &2u32.to_le_bytes()),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &1u32.to_le_bytes()),
     ]);
     assert!(accept_content(at_two.as_slice()).is_ok());
 
     let zero = frame(&[Entry::Literal(
         parameter::ACTIVE_CHAIN_LENGTH,
-        &0u16.to_le_bytes(),
+        &0u32.to_le_bytes(),
     )]);
     assert!(matches!(
         accept_content(zero.as_slice()),
@@ -852,6 +912,8 @@ fn every_caller_limited_identifier_is_constrained() {
         utxo_unspent_bits: 0,
         snake_chain_length_max: 0,
         max_blocks: 0,
+        block_size_max: 0,
+        node_count_max: 0,
     };
     for id in CALLER_LIMITED_IDS {
         assert!(
@@ -902,7 +964,7 @@ fn a_smaller_build_refuses_what_the_reference_build_accepts() {
 
     let long_window = frame(&[Entry::Literal(
         parameter::ACTIVE_CHAIN_LENGTH,
-        &200u16.to_le_bytes(),
+        &200u32.to_le_bytes(),
     )]);
     assert!(super::accept_content(long_window.as_slice(), TEST_LIMITS).is_ok());
     let short_window = BuildLimits {
@@ -940,6 +1002,8 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
         utxo_unspent_bits: 255,
         snake_chain_length_max: 500,
         max_blocks: 600,
+        block_size_max: 2016,
+        node_count_max: 1000,
     };
     assert!(super::accept_content(empty.as_slice(), at_defaults).is_ok());
 
@@ -957,7 +1021,7 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
     // Declaring a value the build can hold is what such a build needs, and the
     // default it replaces is then not measured at all.
     let fits_both = frame(&[
-        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &499u16.to_le_bytes()),
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &499u32.to_le_bytes()),
         Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &254u16.to_le_bytes()),
     ]);
     // `W = 499` with the default `H = 50` needs `499 + 2·50` blocks of storage.
@@ -965,8 +1029,90 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
         utxo_unspent_bits: 254,
         snake_chain_length_max: 499,
         max_blocks: 599,
+        block_size_max: 2016,
+        node_count_max: 1000,
     };
     assert!(super::accept_content(fits_both.as_slice(), small_build).is_ok());
+}
+
+/// A capacity at the top of its parameter's four-byte width would make a
+/// violation unframable, so `limits_are_expressible` must refuse it — for the
+/// block buffer and the node capacity alike (Story 6.15).
+#[test]
+fn a_capacity_at_the_top_of_its_width_is_not_expressible() {
+    assert!(limits_are_expressible(TEST_LIMITS));
+    assert!(!limits_are_expressible(BuildLimits {
+        block_size_max: u32::MAX,
+        ..TEST_LIMITS
+    }));
+    assert!(!limits_are_expressible(BuildLimits {
+        node_count_max: u32::MAX,
+        ..TEST_LIMITS
+    }));
+    assert!(limits_are_expressible(BuildLimits {
+        block_size_max: u32::MAX - 1,
+        node_count_max: u32::MAX - 1,
+        ..TEST_LIMITS
+    }));
+}
+
+/// DEC-228: the network's node cap is chain parameter ID 32, floored at 1 (§6
+/// check 17, universal) and capped by the build's node capacity (check 18).
+#[test]
+fn max_node_count_is_bounded_by_the_build_node_capacity() {
+    let cap = |n: u32| frame(&[Entry::Literal(parameter::MAX_NODE_COUNT, &n.to_le_bytes())]);
+    let refused = |payload: &[u8], limits: BuildLimits| {
+        matches!(
+            super::accept_content(payload, limits),
+            Err(ChainConfigError::BoundViolation(parameter::MAX_NODE_COUNT))
+        )
+    };
+    // Check 17, and the resolution guard holds the same floor.
+    assert!(refused(cap(0).as_slice(), TEST_LIMITS));
+    assert!(check_bound(parameter::MAX_NODE_COUNT, 0).is_err());
+    // Check 18: equal holds, one above is refused.
+    assert!(super::accept_content(cap(1000).as_slice(), TEST_LIMITS).is_ok());
+    assert!(refused(cap(1001).as_slice(), TEST_LIMITS));
+    // An absent cap is measured by its default, 1000.
+    let small_build = BuildLimits {
+        node_count_max: 999,
+        ..TEST_LIMITS
+    };
+    assert!(refused(frame(&[]).as_slice(), small_build));
+    assert!(super::accept_content(cap(999).as_slice(), small_build).is_ok());
+    // A bytecode entry is refused: the parameter is literal-only.
+    let program = frame(&[Entry::Bytecode(parameter::MAX_NODE_COUNT, &PUSH_41_PROGRAM)]);
+    assert!(matches!(
+        super::accept_content(program.as_slice(), TEST_LIMITS),
+        Err(ChainConfigError::BytecodeNotPermitted(
+            parameter::MAX_NODE_COUNT
+        ))
+    ));
+    // The accessor reads a declared value back.
+    let module = loaded(&[Entry::Literal(
+        parameter::MAX_NODE_COUNT,
+        &16u32.to_le_bytes(),
+    )]);
+    let config = module
+        .active_configuration()
+        .expect("content is loaded, so a handle is available");
+    assert_eq!(config.max_node_count(), 16);
+}
+
+/// ID 31 `grace_period_step_ms` is registered as a data row (Story 6.15) so
+/// the registry stays dense; it takes a literal and a program like ID 2.
+#[test]
+fn grace_period_step_is_registered_and_accepts_both_forms() {
+    let literal = frame(&[Entry::Literal(
+        parameter::GRACE_PERIOD_STEP_MS,
+        &600_000u32.to_le_bytes(),
+    )]);
+    assert!(accept_content(literal.as_slice()).is_ok());
+    let program = frame(&[Entry::Bytecode(
+        parameter::GRACE_PERIOD_STEP_MS,
+        &PUSH_41_PROGRAM,
+    )]);
+    assert!(accept_content(program.as_slice()).is_ok());
 }
 
 #[test]
@@ -1012,10 +1158,23 @@ fn verification_horizon_is_bounded_by_the_window_and_the_block_storage() {
     assert!(super::accept_content(declared(Some(401), Some(99)).as_slice(), one_short).is_ok());
     assert!(refused(declared(Some(402), Some(99)).as_slice(), one_short));
 
+    // Four bytes wide (DEC-227): a window above `u16` is accepted when the
+    // build holds it, and read back unchanged.
+    let wide_build = BuildLimits {
+        snake_chain_length_max: 70_000,
+        max_blocks: 70_100,
+        ..TEST_LIMITS
+    };
+    assert!(super::accept_content(declared(Some(70_000), Some(50)).as_slice(), wide_build).is_ok());
+    assert!(refused(
+        declared(Some(70_000), Some(51)).as_slice(),
+        wide_build
+    ));
+
     // The accessor reads a declared value back.
     let module = loaded(&[
-        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &8u16.to_le_bytes()),
-        Entry::Literal(parameter::VERIFICATION_HORIZON, &3u16.to_le_bytes()),
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &8u32.to_le_bytes()),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &3u32.to_le_bytes()),
     ]);
     let config = module
         .active_configuration()

@@ -45,9 +45,9 @@ use moonblokz_vm_asm::assemble;
 
 /// The build this tool encodes for.
 ///
-/// Three of the acceptance checks measure declared values against a capacity of
+/// Five of the acceptance checks measure declared values against a capacity of
 /// the *node's* build rather than against anything universal (the per-block UTXO
-/// spent-bit width, the active-chain window, and the block storage that the window
+/// spent-bit width, the active-chain window, the block buffer, the node capacity, and the block storage that the window
 /// and the verification horizon must fit), so "whatever this tool accepts,
 /// the network accepts" is a statement about a particular build. These are the
 /// reference firmware's values, which is what a founder encoding for the standard
@@ -59,6 +59,8 @@ const REFERENCE_BUILD_LIMITS: BuildLimits = BuildLimits {
     utxo_unspent_bits: 256,
     snake_chain_length_max: 500,
     max_blocks: 600,
+    block_size_max: 2016,
+    node_count_max: 1000,
 };
 
 const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
@@ -72,7 +74,7 @@ const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
 /// together so they cannot drift.
 ///
 /// [`names_match_the_registry`]: #
-pub const NAMES: [(&str, u8); 30] = [
+pub const NAMES: [(&str, u8); 32] = [
     (
         "inter_block_interval_ms",
         parameter::INTER_BLOCK_INTERVAL_MS,
@@ -142,6 +144,8 @@ pub const NAMES: [(&str, u8); 30] = [
     ("replay_block_reward", parameter::REPLAY_BLOCK_REWARD),
     ("vm_fuel_limit", parameter::VM_FUEL_LIMIT),
     ("verification_horizon", parameter::VERIFICATION_HORIZON),
+    ("grace_period_step_ms", parameter::GRACE_PERIOD_STEP_MS),
+    ("max_node_count", parameter::MAX_NODE_COUNT),
 ];
 
 /// The registry identifier a name refers to.
@@ -783,6 +787,22 @@ mod tests {
         )
         .expect_err("over the compile-time capacity");
         assert_eq!(error.line, 0);
+        assert!(error.message.contains("structural bound"));
+
+        // Four bytes wide (DEC-227): a window above `u16` frames, and the
+        // reference build refuses it on its capacity, not on the width.
+        let error = encode("active_chain_length = 70000\n", KEY)
+            .expect_err("over the reference build's window capacity");
+        assert_eq!(error.line, 0);
+        assert!(error.message.contains("structural bound"));
+
+        // The block buffer and the node capacity of the reference build: at the
+        // capacity the content encodes, one above it is refused (IDs 3 and 32).
+        assert!(encode("block_size_limit = 2016\n", KEY).is_ok());
+        let error = encode("block_size_limit = 2017\n", KEY).expect_err("above the block buffer");
+        assert!(error.message.contains("structural bound"));
+        assert!(encode("max_node_count = 1000\n", KEY).is_ok());
+        let error = encode("max_node_count = 1001\n", KEY).expect_err("above the node capacity");
         assert!(error.message.contains("structural bound"));
 
         // Reading another parameter is legitimate and must still encode.
