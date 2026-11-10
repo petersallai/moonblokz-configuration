@@ -6,7 +6,7 @@
 
 use core::cell::{Cell, RefCell};
 
-use moonblokz_chain_types::{CONFIG_KEY_BYTECODE_FLAG, ChainConfigPayloadBuilder};
+use moonblokz_chain_types::{CONFIG_KEY_BYTECODE_FLAG, ChainConfigPayloadBuilder, MAX_BLOCK_SIZE};
 use moonblokz_crypto::{Crypto, CryptoTrait, PRIVATE_KEY_SIZE, SIGNATURE_SIZE};
 use moonblokz_vm::opcode as op;
 
@@ -42,6 +42,7 @@ const TEST_LIMITS: BuildLimits = BuildLimits {
     utxo_unspent_bits: 256,
     snake_chain_length_max: 500,
     max_blocks: 600,
+    block_size_max: MAX_BLOCK_SIZE as u32,
 };
 
 const _: () = assert!(limits_are_expressible(TEST_LIMITS));
@@ -92,7 +93,7 @@ fn frame_raw(count: u16, body: &[u8]) -> Payload {
 }
 
 /// A content declaring the window `w` and the horizon `h`, each only when given.
-fn window_and_horizon(w: Option<u16>, h: Option<u16>) -> Payload {
+fn window_and_horizon(w: Option<u32>, h: Option<u32>) -> Payload {
     let w_bytes = w.unwrap_or(0).to_le_bytes();
     let h_bytes = h.unwrap_or(0).to_le_bytes();
     let both = [
@@ -735,16 +736,18 @@ fn vote_scale_may_not_be_zero() {
 }
 
 #[test]
-fn block_size_limit_is_bounded_by_the_block_buffer() {
+fn block_size_limit_is_bounded_by_the_build_block_buffer() {
+    // §6 check 5 (DEC-225): the ceiling is the caller's `block_size_max`, a
+    // build capacity, so it lives in `check_build_limit`, off the resolution path.
     let at_bound = frame(&[Entry::Literal(
         parameter::BLOCK_SIZE_LIMIT,
-        &(MAX_BLOCK_SIZE as u16).to_le_bytes(),
+        &TEST_LIMITS.block_size_max.to_le_bytes(),
     )]);
     assert!(accept_content(at_bound.as_slice()).is_ok());
 
     let over = frame(&[Entry::Literal(
         parameter::BLOCK_SIZE_LIMIT,
-        &(MAX_BLOCK_SIZE as u16 + 1).to_le_bytes(),
+        &(TEST_LIMITS.block_size_max + 1).to_le_bytes(),
     )]);
     assert!(matches!(
         accept_content(over.as_slice()),
@@ -752,18 +755,45 @@ fn block_size_limit_is_bounded_by_the_block_buffer() {
             parameter::BLOCK_SIZE_LIMIT
         ))
     ));
+    assert!(check_bound(parameter::BLOCK_SIZE_LIMIT, u64::from(u32::MAX)).is_ok());
 
-    // A limit that cannot admit a header admits no block at all, and every
-    // remaining-capacity computation against it underflows.
+    // A build whose buffer is below the default refuses a content that leaves
+    // the limit undeclared: the chain resolves 2016, which it cannot hold.
+    let small_buffer = BuildLimits {
+        block_size_max: 2015,
+        ..TEST_LIMITS
+    };
+    assert!(matches!(
+        super::accept_content(frame(&[]).as_slice(), small_buffer),
+        Err(ChainConfigError::BoundViolation(
+            parameter::BLOCK_SIZE_LIMIT
+        ))
+    ));
+
+    // A larger build holds a limit above `u16` (DEC-227: four bytes wide).
+    let large_buffer = BuildLimits {
+        block_size_max: 4 * 1024 * 1024,
+        ..TEST_LIMITS
+    };
+    let large = frame(&[Entry::Literal(
+        parameter::BLOCK_SIZE_LIMIT,
+        &(4u32 * 1024 * 1024).to_le_bytes(),
+    )]);
+    assert!(super::accept_content(large.as_slice(), large_buffer).is_ok());
+    assert!(accept_content(large.as_slice()).is_err());
+
+    // The floor is universal (check 10): a limit that cannot admit a header
+    // admits no block at all, and every remaining-capacity computation against
+    // it underflows.
     let above_header = frame(&[Entry::Literal(
         parameter::BLOCK_SIZE_LIMIT,
-        &(HEADER_SIZE as u16 + 1).to_le_bytes(),
+        &(HEADER_SIZE as u32 + 1).to_le_bytes(),
     )]);
     assert!(accept_content(above_header.as_slice()).is_ok());
 
     let at_header = frame(&[Entry::Literal(
         parameter::BLOCK_SIZE_LIMIT,
-        &(HEADER_SIZE as u16).to_le_bytes(),
+        &(HEADER_SIZE as u32).to_le_bytes(),
     )]);
     assert!(matches!(
         accept_content(at_header.as_slice()),
@@ -794,7 +824,7 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
 
     // A window of one block admits no horizon: `1 ≤ H < W` is empty (§6 check
     // 15), so the content is refused whatever `H` it declares.
-    for h in [None, Some(1u16)] {
+    for h in [None, Some(1u32)] {
         let at_one = window_and_horizon(Some(1), h);
         assert!(matches!(
             accept_content(at_one.as_slice()),
@@ -805,14 +835,14 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
     }
     // The smallest acceptable window holds one horizon block below it.
     let at_two = frame(&[
-        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &2u16.to_le_bytes()),
-        Entry::Literal(parameter::VERIFICATION_HORIZON, &1u16.to_le_bytes()),
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &2u32.to_le_bytes()),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &1u32.to_le_bytes()),
     ]);
     assert!(accept_content(at_two.as_slice()).is_ok());
 
     let zero = frame(&[Entry::Literal(
         parameter::ACTIVE_CHAIN_LENGTH,
-        &0u16.to_le_bytes(),
+        &0u32.to_le_bytes(),
     )]);
     assert!(matches!(
         accept_content(zero.as_slice()),
@@ -852,6 +882,7 @@ fn every_caller_limited_identifier_is_constrained() {
         utxo_unspent_bits: 0,
         snake_chain_length_max: 0,
         max_blocks: 0,
+        block_size_max: 0,
     };
     for id in CALLER_LIMITED_IDS {
         assert!(
@@ -902,7 +933,7 @@ fn a_smaller_build_refuses_what_the_reference_build_accepts() {
 
     let long_window = frame(&[Entry::Literal(
         parameter::ACTIVE_CHAIN_LENGTH,
-        &200u16.to_le_bytes(),
+        &200u32.to_le_bytes(),
     )]);
     assert!(super::accept_content(long_window.as_slice(), TEST_LIMITS).is_ok());
     let short_window = BuildLimits {
@@ -940,6 +971,7 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
         utxo_unspent_bits: 255,
         snake_chain_length_max: 500,
         max_blocks: 600,
+        block_size_max: 2016,
     };
     assert!(super::accept_content(empty.as_slice(), at_defaults).is_ok());
 
@@ -957,7 +989,7 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
     // Declaring a value the build can hold is what such a build needs, and the
     // default it replaces is then not measured at all.
     let fits_both = frame(&[
-        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &499u16.to_le_bytes()),
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &499u32.to_le_bytes()),
         Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &254u16.to_le_bytes()),
     ]);
     // `W = 499` with the default `H = 50` needs `499 + 2·50` blocks of storage.
@@ -965,6 +997,7 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
         utxo_unspent_bits: 254,
         snake_chain_length_max: 499,
         max_blocks: 599,
+        block_size_max: 2016,
     };
     assert!(super::accept_content(fits_both.as_slice(), small_build).is_ok());
 }
@@ -1012,10 +1045,23 @@ fn verification_horizon_is_bounded_by_the_window_and_the_block_storage() {
     assert!(super::accept_content(declared(Some(401), Some(99)).as_slice(), one_short).is_ok());
     assert!(refused(declared(Some(402), Some(99)).as_slice(), one_short));
 
+    // Four bytes wide (DEC-227): a window above `u16` is accepted when the
+    // build holds it, and read back unchanged.
+    let wide_build = BuildLimits {
+        snake_chain_length_max: 70_000,
+        max_blocks: 70_100,
+        ..TEST_LIMITS
+    };
+    assert!(super::accept_content(declared(Some(70_000), Some(50)).as_slice(), wide_build).is_ok());
+    assert!(refused(
+        declared(Some(70_000), Some(51)).as_slice(),
+        wide_build
+    ));
+
     // The accessor reads a declared value back.
     let module = loaded(&[
-        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &8u16.to_le_bytes()),
-        Entry::Literal(parameter::VERIFICATION_HORIZON, &3u16.to_le_bytes()),
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &8u32.to_le_bytes()),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &3u32.to_le_bytes()),
     ]);
     let config = module
         .active_configuration()

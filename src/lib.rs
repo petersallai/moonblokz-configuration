@@ -42,7 +42,7 @@ that runs in the blockchain, over the envelope
 use core::num::NonZeroU16;
 
 use moonblokz_chain_types::{
-    ChainConfigBlockPayloadView, ConfigValueView, HEADER_SIZE, MAX_BLOCK_SIZE, MAX_PAYLOAD_SIZE,
+    ChainConfigBlockPayloadView, ConfigValueView, HEADER_SIZE, MAX_PAYLOAD_SIZE,
 };
 use moonblokz_crypto::MAX_AGGREGATED_SIGNATURES;
 use moonblokz_vm::{Fuel, HOST_READ_CHAIN_INFO, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
@@ -54,10 +54,11 @@ use moonblokz_vm::{Fuel, HOST_READ_CHAIN_INFO, HOST_RESOLVE_CONFIG, Vm, VmHost, 
 /// The per-build capacities a chain's declared values must fit inside, as the
 /// **caller** states them.
 ///
-/// Three of §6's bound checks measure chain-declared values against a capacity of
+/// Four of §6's bound checks measure chain-declared values against a capacity of
 /// the *local build*: the per-block UTXO spent-bit width, the active-chain window,
-/// and the block-storage capacity. All three are const generics of
-/// `moonblokz-blockchain`, which depends on
+/// the block-storage capacity and the block buffer. They are const generics or
+/// build constants of `moonblokz-blockchain` (the block buffer is the
+/// `moonblokz-chain-types` size tier, DEC-220), which depends on
 /// this crate and not the reverse, so this crate cannot read them — and it does
 /// not copy them either. The caller that owns them passes them in once, at
 /// construction, which makes drift between the two sides **unrepresentable**
@@ -93,14 +94,23 @@ pub struct BuildLimits {
     /// capacity is below the chain's `W` cannot participate and rejects the
     /// configuration, and a node whose capacity exceeds it simply uses part of
     /// what it allocated.
-    pub snake_chain_length_max: u16,
+    pub snake_chain_length_max: u32,
 
     /// Block-storage capacity of the local build (`MAX_BLOCKS`).
     ///
     /// The window `W`, the verification horizon `H` below it and one competing
     /// branch of depth `H` must fit (FR58), so acceptance refuses a chain with
     /// `W + 2·H` above this (§6 check 16).
-    pub max_blocks: u16,
+    pub max_blocks: u32,
+
+    /// Block buffer capacity of the local build: the largest encoded block it
+    /// can frame, hold and store (`MAX_BLOCK_SIZE`, the build's size tier).
+    ///
+    /// The chain's maximum is its `block_size_limit` (ID 3), a consensus rule.
+    /// A chain declaring more than this cannot be held by the local node, so the
+    /// acceptance pass rejects it (§6 check 5); a block above it is then a local
+    /// refusal, never evidence (DEC-225).
+    pub block_size_max: u32,
 }
 
 /// Whether `limits` leaves a bound violation expressible in the declared width of
@@ -115,9 +125,9 @@ pub struct BuildLimits {
 /// state `max_block_utxo_output` was in while it was one byte wide against a
 /// 256-bit capacity.
 ///
-/// `max_blocks` needs no relation here: it bounds `W + 2·H`, and a `u16`
-/// capacity can never reach the largest sum the two parameters' widths can
-/// frame, so a violation of check 16 is always expressible.
+/// `max_blocks` needs no relation here: it bounds `W + 2·H`, and with `W` and
+/// `H` four bytes wide the largest framable sum is `3·(2³²−1)`, above any `u32`
+/// capacity, so a violation of check 16 is always expressible.
 ///
 /// Assert it where the capacities are stated, so that widening a capacity or
 /// narrowing a width fails the build:
@@ -129,6 +139,7 @@ pub struct BuildLimits {
 ///     utxo_unspent_bits: 256,
 ///     snake_chain_length_max: 500,
 ///     max_blocks: 600,
+///     block_size_max: 2016,
 /// };
 /// const _: () = assert!(limits_are_expressible(LIMITS));
 /// ```
@@ -139,7 +150,7 @@ pub const fn limits_are_expressible(limits: BuildLimits) -> bool {
     ) && ceiling_fits(
         parameter::ACTIVE_CHAIN_LENGTH,
         limits.snake_chain_length_max as u64,
-    )
+    ) && ceiling_fits(parameter::BLOCK_SIZE_LIMIT, limits.block_size_max as u64)
 }
 
 /// Whether a value one above `ceiling` is representable in `id`'s declared width.
@@ -241,8 +252,9 @@ pub mod parameter {
     pub const INTER_BLOCK_INTERVAL_MS: u8 = 1;
     /// FR47 grace-period window length, milliseconds.
     pub const GRACE_PERIOD_WINDOW_MS: u8 = 2;
-    /// Block-size limit. Literal-only: its bound is what keeps the limit inside
-    /// the compile-time block buffer, and only a declared value is checkable.
+    /// Block-size limit, the chain's maximum block. Its floor is the block
+    /// header; its ceiling is the caller's
+    /// [`crate::BuildLimits::block_size_max`]. Literal-only.
     pub const BLOCK_SIZE_LIMIT: u8 = 3;
     /// Maximum UTXO outputs per block, bounded by the caller's
     /// [`crate::BuildLimits::utxo_unspent_bits`].
@@ -443,7 +455,7 @@ const fn spec_of_program(
 const REGISTRY: [ParameterSpec; 30] = [
     spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, true, 60_000),
     spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, true, 30_000),
-    spec_of(parameter::BLOCK_SIZE_LIMIT, 2, false, 2016),
+    spec_of(parameter::BLOCK_SIZE_LIMIT, 4, false, 2016),
     spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 2, false, 255),
     spec_of(parameter::MAX_AGGREGATED_SIGNATURES, 1, false, 50),
     spec_of(parameter::VOTE_SCALE, 2, true, 1000),
@@ -480,7 +492,7 @@ const REGISTRY: [ParameterSpec; 30] = [
     spec_of(parameter::RETRY_INTERVAL_FOR_MISSING_PACKETS, 1, false, 60),
     spec_of(parameter::TX_MAXIMUM_RANDOM_DELAY, 2, false, 200),
     spec_of(parameter::BLOCK_FILL_THRESHOLD_PERCENT, 1, true, 80),
-    spec_of(parameter::ACTIVE_CHAIN_LENGTH, 2, false, 500),
+    spec_of(parameter::ACTIVE_CHAIN_LENGTH, 4, false, 500),
     spec_of(
         parameter::MEMPOOL_REPLENISHMENT_INTERVAL_MS,
         4,
@@ -499,7 +511,7 @@ const REGISTRY: [ParameterSpec; 30] = [
     ),
     spec_of(parameter::REPLAY_BLOCK_REWARD, 8, true, 100),
     spec_of(parameter::VM_FUEL_LIMIT, 4, false, 20_000),
-    spec_of(parameter::VERIFICATION_HORIZON, 2, false, 50),
+    spec_of(parameter::VERIFICATION_HORIZON, 4, false, 50),
 ];
 
 // Identifiers are allocated densely from 1, so the record for an identifier sits
@@ -512,7 +524,7 @@ const _: () = {
         assert!(REGISTRY[index].id as usize == index + 1);
         // Every value is carried through a `u64`, which bounds the widths the
         // registry may declare. A width of zero would admit no value at all, and
-        // would make the shift in `ceiling_is_expressible` overflow.
+        // would make the shift in `ceiling_fits` overflow.
         assert!(REGISTRY[index].width >= 1 && REGISTRY[index].width as usize <= 8);
         index += 1;
     }
@@ -532,7 +544,8 @@ pub const PARAMETER_COUNT: usize = REGISTRY.len();
 /// with a *different value* than a differently-built node resolves, with no error
 /// on either side. Admitting a program here would put the bound on the resolution
 /// path, so the form is the enforcement.
-const PER_BUILD_LIMITED_IDS: [u8; 4] = [
+const PER_BUILD_LIMITED_IDS: [u8; 5] = [
+    parameter::BLOCK_SIZE_LIMIT,
     parameter::MAX_BLOCK_UTXO_OUTPUT,
     parameter::MAX_AGGREGATED_SIGNATURES,
     parameter::ACTIVE_CHAIN_LENGTH,
@@ -571,7 +584,8 @@ const _: () = {
 /// `every_caller_limited_identifier_is_constrained` drives a case per entry through
 /// [`check_build_limit`] in both directions, so the list and the function cannot
 /// drift apart: an entry with no arm fails, and an arm with no entry fails.
-const CALLER_LIMITED_IDS: [u8; 2] = [
+const CALLER_LIMITED_IDS: [u8; 3] = [
+    parameter::BLOCK_SIZE_LIMIT,
     parameter::MAX_BLOCK_UTXO_OUTPUT,
     parameter::ACTIVE_CHAIN_LENGTH,
 ];
@@ -856,7 +870,7 @@ pub struct ChainConfiguration<Sink: ConfigChangeSink> {
     /// `None` is the absent state; the buffer above is then simply unread.
     commitment: Option<Commitment>,
     sink: Sink,
-    /// The local build's capacities, as its owner stated them (§6). Four bytes,
+    /// The local build's capacities, as its owner stated them (§6). A few bytes,
     /// held for the module's life because they are build facts rather than
     /// per-load data — which is also why they sit on the constructor.
     limits: BuildLimits,
@@ -1033,9 +1047,11 @@ impl<'a> ActiveConfig<'a> {
         narrow_u32(self.resolve(parameter::GRACE_PERIOD_WINDOW_MS))
     }
 
-    /// Chain-config block-size limit, at most `MAX_BLOCK_SIZE`.
-    pub fn block_size_limit(&self) -> u16 {
-        narrow_u16(self.resolve(parameter::BLOCK_SIZE_LIMIT))
+    /// The chain's block-size limit (a consensus rule), at most the caller's
+    /// [`crate::BuildLimits::block_size_max`]: acceptance refuses a chain that
+    /// declares more than the build can hold.
+    pub fn block_size_limit(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::BLOCK_SIZE_LIMIT))
     }
 
     /// Maximum UTXO outputs per block — the **chain's declared value**.
@@ -1118,8 +1134,8 @@ impl<'a> ActiveConfig<'a> {
 
     /// Active-chain window length `W`, at most the caller's
     /// [`crate::BuildLimits::snake_chain_length_max`].
-    pub fn active_chain_length(&self) -> u16 {
-        narrow_u16(self.resolve(parameter::ACTIVE_CHAIN_LENGTH))
+    pub fn active_chain_length(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::ACTIVE_CHAIN_LENGTH))
     }
 
     /// FR58 verification horizon `H`.
@@ -1128,8 +1144,8 @@ impl<'a> ActiveConfig<'a> {
     /// `H < W`, and the storage bound `W + 2·H ≤`
     /// [`crate::BuildLimits::max_blocks`] are upheld at acceptance: both
     /// parameters are literal-only, so the accepted values are the resolved ones.
-    pub fn verification_horizon(&self) -> u16 {
-        narrow_u16(self.resolve(parameter::VERIFICATION_HORIZON))
+    pub fn verification_horizon(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::VERIFICATION_HORIZON))
     }
 
     /// FR56 mempool replenishment interval, milliseconds.
@@ -1503,12 +1519,11 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
     // chain at all — the spent-bit width, the active-chain capacity, the
     // verification horizon, the aggregation ceiling, the vote denominator, the
     // execution budget — is
-    // literal-only, so its declared value is checked below. The two bounded
-    // parameters that do admit a program (`block_size_limit`,
-    // `block_fill_threshold_percent`) can only be driven out of range into a
-    // *weaker rule* the whole chain applies alike — a limit that never binds, a
-    // fill threshold that never triggers — never into a value this node cannot
-    // hold. That is founder self-harm on a node-#0-signed content, not a
+    // literal-only, so its declared value is checked below. The one bounded
+    // parameter that does admit a program (`block_fill_threshold_percent`) can
+    // only be driven out of range into a *weaker rule* the whole chain applies
+    // alike — a fill threshold that never triggers — never into a value this
+    // node cannot hold. That is founder self-harm on a node-#0-signed content, not a
     // consensus split and not a representation failure.
     let mut tx_fee_min = None;
     let mut tx_fee_max = None;
@@ -1608,11 +1623,11 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
 /// disagreed about the bound they would disagree about the value, with no error on
 /// either side. Every bound reachable from here must therefore hold identically on
 /// every build. That is why the parameters bounded by a [`BuildLimits`]
-/// capacity — IDs 4, 21 and 30 — are literal-only: their limits are the caller's
+/// capacity — IDs 3, 4, 21 and 30 — are literal-only: their limits are the caller's
 /// build's, so the decision has to stay at acceptance, where the answer is
 /// rejection rather than substitution. Their checks live in separate
 /// acceptance-only functions, so this one cannot reach them even by mistake. Every bound this function can reach is universal — 0, 1, 100, and
-/// the block format's own `HEADER_SIZE` and `MAX_BLOCK_SIZE`. ID 10's ceiling was
+/// the block format's own `HEADER_SIZE`. ID 10's ceiling was
 /// the one exception and is no longer here: it became a clamp against the chain's
 /// own declared value instead (see [`ActiveConfig::required_support`]).
 fn bounded(id: u8, value: u64) -> Option<u64> {
@@ -1659,12 +1674,11 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
         }
         // FR37: the denominator of the anti-capture rule.
         parameter::VOTE_SCALE => declared != 0,
-        // The compile-time block buffer width above; the fixed header below,
-        // since a limit that cannot admit a header admits no block at all and
-        // every remaining-capacity computation against it underflows.
-        parameter::BLOCK_SIZE_LIMIT => {
-            declared > HEADER_SIZE as u64 && declared <= MAX_BLOCK_SIZE as u64
-        }
+        // The fixed header below, since a limit that cannot admit a header
+        // admits no block at all and every remaining-capacity computation
+        // against it underflows (check 10). Universal; the ceiling is the
+        // caller's block buffer and lives in `check_build_limit` (check 5).
+        parameter::BLOCK_SIZE_LIMIT => declared > HEADER_SIZE as u64,
         // A percentage.
         parameter::BLOCK_FILL_THRESHOLD_PERCENT => declared <= 100,
         // A window has to hold at least one block. The capacity above it is the
@@ -1700,7 +1714,7 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
 /// only [`accept_content`] calls them — makes that structural. The resolution
 /// guard has no `BuildLimits` to hand and no way to reach these arms.
 ///
-/// Both parameters are literal-only besides (`PER_BUILD_LIMITED_IDS`), so a
+/// Every parameter here is literal-only besides (`PER_BUILD_LIMITED_IDS`), so a
 /// computed value could never arrive at one in the first place.
 fn check_build_limit(id: u8, declared: u64, limits: BuildLimits) -> Result<(), ChainConfigError> {
     let within = match id {
@@ -1713,6 +1727,10 @@ fn check_build_limit(id: u8, declared: u64, limits: BuildLimits) -> Result<(), C
         parameter::MAX_BLOCK_UTXO_OUTPUT => declared <= limits.utxo_unspent_bits as u64,
         // FR8: the chain's window must fit the capacity this build allocated.
         parameter::ACTIVE_CHAIN_LENGTH => declared <= limits.snake_chain_length_max as u64,
+        // §6 check 5: the chain's block-size limit must fit the block buffer this
+        // build allocated (DEC-225). A chain above it cannot be held, so the node
+        // refuses it here; it never judges a block it could not frame.
+        parameter::BLOCK_SIZE_LIMIT => declared <= limits.block_size_max as u64,
         _ => true,
     };
 

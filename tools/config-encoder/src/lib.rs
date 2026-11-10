@@ -45,9 +45,9 @@ use moonblokz_vm_asm::assemble;
 
 /// The build this tool encodes for.
 ///
-/// Three of the acceptance checks measure declared values against a capacity of
+/// Four of the acceptance checks measure declared values against a capacity of
 /// the *node's* build rather than against anything universal (the per-block UTXO
-/// spent-bit width, the active-chain window, and the block storage that the window
+/// spent-bit width, the active-chain window, the block buffer, and the block storage that the window
 /// and the verification horizon must fit), so "whatever this tool accepts,
 /// the network accepts" is a statement about a particular build. These are the
 /// reference firmware's values, which is what a founder encoding for the standard
@@ -59,6 +59,7 @@ const REFERENCE_BUILD_LIMITS: BuildLimits = BuildLimits {
     utxo_unspent_bits: 256,
     snake_chain_length_max: 500,
     max_blocks: 600,
+    block_size_max: 2016,
 };
 
 const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
@@ -782,6 +783,13 @@ mod tests {
             KEY,
         )
         .expect_err("over the compile-time capacity");
+        assert_eq!(error.line, 0);
+        assert!(error.message.contains("structural bound"));
+
+        // Four bytes wide (DEC-227): a window above `u16` frames, and the
+        // reference build refuses it on its capacity, not on the width.
+        let error = encode("active_chain_length = 70000\n", KEY)
+            .expect_err("over the reference build's window capacity");
         assert_eq!(error.line, 0);
         assert!(error.message.contains("structural bound"));
 
