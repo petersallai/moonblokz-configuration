@@ -82,10 +82,7 @@ pub const NAMES: [(&str, u8); 32] = [
     ("grace_period_window_ms", parameter::GRACE_PERIOD_WINDOW_MS),
     ("block_size_limit", parameter::BLOCK_SIZE_LIMIT),
     ("max_block_utxo_output", parameter::MAX_BLOCK_UTXO_OUTPUT),
-    (
-        "max_aggregated_signatures",
-        parameter::MAX_AGGREGATED_SIGNATURES,
-    ),
+    ("mining_reward", parameter::MINING_REWARD),
     ("vote_scale", parameter::VOTE_SCALE),
     ("vote_interest", parameter::VOTE_INTEREST),
     (

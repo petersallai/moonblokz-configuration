@@ -168,12 +168,11 @@ fn empty_override_set_resolves_every_default() {
     assert_eq!(config.grace_period_window_ms(), 30_000);
     assert_eq!(config.block_size_limit(), 2016);
     assert_eq!(config.max_utxo_outputs(), 255);
-    assert_eq!(config.max_aggregated_signatures(), 50);
     assert_eq!(config.vote_scale().get(), 1000);
     assert_eq!(config.vote_interest(), 5);
     assert_eq!(config.parent_recovery_per_head_retry_interval_ms(), 120_000);
     assert_eq!(config.parent_recovery_min_emit_interval_ms(), 10_000);
-    assert_eq!(config.required_support(), 3);
+    assert_eq!(config.required_support(), 40);
     assert_eq!(config.block_fill_threshold_percent(), 80);
     assert_eq!(config.active_chain_length(), 500);
     assert_eq!(config.mempool_replenishment_interval_ms(), 500_000);
@@ -207,8 +206,8 @@ fn empty_override_set_resolves_every_default() {
 
 #[test]
 fn every_default_satisfies_its_own_bound() {
-    // Absent parameters are not bound-checked at acceptance, so both code-baked
-    // tiers have to be in range by construction. A literal default and its
+    // Most absent parameters are not bound-checked at acceptance, so both
+    // code-baked tiers have to be in range by construction. A literal default and its
     // fallback are the same value; a program default is checked through its
     // fallback, which is the value a failing program lands on.
     for spec in REGISTRY.iter() {
@@ -653,30 +652,33 @@ fn a_payload_over_the_retention_buffer_is_refused() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn required_support_is_floored_at_acceptance_and_clamped_at_resolution() {
-    // The floor is universal, so acceptance checks it and the resolution guard can
-    // enforce it on a computed value too.
-    let zero = frame(&[Entry::Literal(parameter::REQUIRED_SUPPORT, &[0])]);
-    assert!(matches!(
-        accept_content(zero.as_slice()),
-        Err(ChainConfigError::BoundViolation(
-            parameter::REQUIRED_SUPPORT
-        ))
-    ));
-    let at_one = frame(&[Entry::Literal(parameter::REQUIRED_SUPPORT, &[1])]);
-    assert!(accept_content(at_one.as_slice()).is_ok());
+fn required_support_is_bounded_by_the_backend_ceiling() {
+    // §6 checks 2 and 3 (DEC-075): the chain states the approval threshold's cap,
+    // and this build states how many signatures it can aggregate and verify.
+    for ok in [1, MAX_AGGREGATED_SIGNATURES as u8] {
+        let payload = frame(&[Entry::Literal(parameter::REQUIRED_SUPPORT, &[ok])]);
+        assert!(
+            accept_content(payload.as_slice()).is_ok(),
+            "{ok} is in range"
+        );
+    }
+    for bad in [0, MAX_AGGREGATED_SIGNATURES as u8 + 1] {
+        let payload = frame(&[Entry::Literal(parameter::REQUIRED_SUPPORT, &[bad])]);
+        assert!(
+            matches!(
+                accept_content(payload.as_slice()),
+                Err(ChainConfigError::BoundViolation(
+                    parameter::REQUIRED_SUPPORT
+                ))
+            ),
+            "{bad} is out of range"
+        );
+    }
 
-    // The ceiling is *not* checked at acceptance any more: it is the chain's own
-    // `max_aggregated_signatures`, applied as a clamp, so a value above it is
-    // legal content that resolves to the ceiling.
-    let over = frame(&[Entry::Literal(
-        parameter::REQUIRED_SUPPORT,
-        &[MAX_AGGREGATED_SIGNATURES as u8 + 1],
-    )]);
-    assert!(accept_content(over.as_slice()).is_ok());
+    // No clamp: an accepted value resolves as declared.
     let module = loaded(&[Entry::Literal(
         parameter::REQUIRED_SUPPORT,
-        &[MAX_AGGREGATED_SIGNATURES as u8 + 1],
+        &[MAX_AGGREGATED_SIGNATURES as u8],
     )]);
     assert_eq!(
         module
@@ -688,43 +690,35 @@ fn required_support_is_floored_at_acceptance_and_clamped_at_resolution() {
 }
 
 #[test]
-fn the_required_support_clamp_reads_the_chains_own_ceiling() {
-    // The clamp limit comes from the content, not from a build constant -- which is
-    // the whole point of the split. A chain that lowers its evidence ceiling lowers
-    // the effective support with it, identically on every node.
-    let module = loaded(&[
-        Entry::Literal(parameter::MAX_AGGREGATED_SIGNATURES, &[10]),
-        Entry::Literal(parameter::REQUIRED_SUPPORT, &[40]),
-    ]);
-    let config = module.active_configuration().expect("handle");
-    assert_eq!(config.max_aggregated_signatures(), 10);
-    assert_eq!(config.required_support(), 10);
+fn required_support_is_literal_only() {
+    // DEC-197: the threshold binds no chain state, and its ceiling is a per-build
+    // constant, which must never be enforced by fallback (§6).
+    let program = push_u8_program(4);
+    let payload = frame(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &program)]);
+    assert!(matches!(
+        accept_content(payload.as_slice()),
+        Err(ChainConfigError::BytecodeNotPermitted(
+            parameter::REQUIRED_SUPPORT
+        ))
+    ));
+}
 
-    // Below the ceiling the declared value stands.
-    let module = loaded(&[
-        Entry::Literal(parameter::MAX_AGGREGATED_SIGNATURES, &[10]),
-        Entry::Literal(parameter::REQUIRED_SUPPORT, &[4]),
-    ]);
+#[test]
+fn an_absent_required_support_is_measured_by_its_default() {
+    // DEC-173: an absent ID 10 resolves to 40, and acceptance measures that value
+    // against the backend ceiling. The reference backends aggregate 50, so the
+    // chain is accepted; a backend below 40 would refuse it at this check.
+    const _: () = assert!(MAX_AGGREGATED_SIGNATURES >= 40);
+    let payload = frame(&[Entry::Literal(parameter::VOTE_INTEREST, &[9])]);
+    assert!(accept_content(payload.as_slice()).is_ok());
+    let module = loaded(&[Entry::Literal(parameter::VOTE_INTEREST, &[9])]);
     assert_eq!(
         module
             .active_configuration()
             .expect("handle")
             .required_support(),
-        4
+        40
     );
-
-    // The ceiling itself is still literal-only and still bound-checked against the
-    // backend at acceptance, where the answer is rejection rather than a clamp.
-    let over = frame(&[Entry::Literal(
-        parameter::MAX_AGGREGATED_SIGNATURES,
-        &[MAX_AGGREGATED_SIGNATURES as u8 + 1],
-    )]);
-    assert!(matches!(
-        accept_content(over.as_slice()),
-        Err(ChainConfigError::BoundViolation(
-            parameter::MAX_AGGREGATED_SIGNATURES
-        ))
-    ));
 }
 
 #[test]
@@ -1247,36 +1241,6 @@ fn max_block_utxo_output_is_bounded_by_the_spent_bit_width() {
 }
 
 #[test]
-fn max_aggregated_signatures_is_bounded_by_the_backend_ceiling() {
-    // The chain states how many signatures an approval-evidence block may carry;
-    // this build states how many it can aggregate and verify.
-    let at_bound = frame(&[Entry::Literal(
-        parameter::MAX_AGGREGATED_SIGNATURES,
-        &[MAX_AGGREGATED_SIGNATURES as u8],
-    )]);
-    assert!(accept_content(at_bound.as_slice()).is_ok());
-
-    let over = frame(&[Entry::Literal(
-        parameter::MAX_AGGREGATED_SIGNATURES,
-        &[MAX_AGGREGATED_SIGNATURES as u8 + 1],
-    )]);
-    assert!(matches!(
-        accept_content(over.as_slice()),
-        Err(ChainConfigError::BoundViolation(
-            parameter::MAX_AGGREGATED_SIGNATURES
-        ))
-    ));
-
-    let zero = frame(&[Entry::Literal(parameter::MAX_AGGREGATED_SIGNATURES, &[0])]);
-    assert!(matches!(
-        accept_content(zero.as_slice()),
-        Err(ChainConfigError::BoundViolation(
-            parameter::MAX_AGGREGATED_SIGNATURES
-        ))
-    ));
-}
-
-#[test]
 fn block_fill_threshold_is_a_percentage() {
     let at_bound = frame(&[Entry::Literal(
         parameter::BLOCK_FILL_THRESHOLD_PERCENT,
@@ -1454,57 +1418,14 @@ fn a_computed_vote_scale_may_not_be_zero() {
 }
 
 #[test]
-fn a_computed_required_support_is_floored_by_fallback_and_capped_by_clamp() {
-    // Identifier 10 admits a program, and the two ends of its range are enforced by
-    // two different mechanisms -- which is the point of the split. Below 1 the
-    // universal floor fails the tier, so the code-baked 3 stands.
-    let below = push_u8_program(0);
-    let module = loaded(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &below)]);
-    assert_eq!(
-        module
-            .active_configuration()
-            .expect("handle")
-            .required_support(),
-        3
-    );
-
-    // Above the chain's ceiling the clamp applies, keeping the computation's intent
-    // rather than discarding it for the default.
-    let above = push_u8_program(MAX_AGGREGATED_SIGNATURES as u8 + 1);
-    let module = loaded(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &above)]);
-    assert_eq!(
-        module
-            .active_configuration()
-            .expect("handle")
-            .required_support(),
-        MAX_AGGREGATED_SIGNATURES as u8
-    );
-
-    // And a computed value inside the range is used as computed.
-    let valid = push_u8_program(5);
-    let module = loaded(&[Entry::Bytecode(parameter::REQUIRED_SUPPORT, &valid)]);
-    assert_eq!(
-        module
-            .active_configuration()
-            .expect("handle")
-            .required_support(),
-        5
-    );
-}
-
-#[test]
-fn the_aggregation_ceiling_is_uniform_across_backends() {
-    // A tripwire, not a property of this crate. `required_support`'s upper bound is
-    // now reachable from *resolution*, where a violation falls back rather than
-    // rejecting the chain — so two builds that disagreed about the ceiling would
-    // resolve the same content to different values, silently. That is safe only
-    // while every crypto backend reports the same ceiling. If this assertion ever
-    // fails, identifier 10 must go back to literal-only, or its upper bound must
-    // move out of the resolution guard and stay at acceptance.
-    assert_eq!(
-        MAX_AGGREGATED_SIGNATURES, 50,
-        "a backend changed the aggregation ceiling: see identifier 10's value form"
-    );
+fn mining_reward_accepts_a_literal_and_a_program() {
+    // ID 5 is `mining_reward` (DEC-109): a `u32` that may be computed. Story 6.4
+    // registers the row; its accessor and FR6's `mined_amount` rule are Story 7.2's.
+    let literal = frame(&[Entry::Literal(parameter::MINING_REWARD, &[100, 0, 0, 0])]);
+    assert!(accept_content(literal.as_slice()).is_ok());
+    let program = push_u8_program(7);
+    let computed = frame(&[Entry::Bytecode(parameter::MINING_REWARD, &program)]);
+    assert!(accept_content(computed.as_slice()).is_ok());
 }
 
 #[test]
