@@ -62,9 +62,9 @@ use moonblokz_vm::{Fuel, HOST_READ_CHAIN_INFO, HOST_RESOLVE_CONFIG, Vm, VmHost, 
 /// this crate and not the reverse, so this crate cannot read them — and it does
 /// not copy them either. The caller that owns them passes them in once, at
 /// construction, which makes drift between the two sides **unrepresentable**
-/// rather than asserted. A third per-build ceiling needs no such treatment:
-/// `MAX_AGGREGATED_SIGNATURES` comes from `moonblokz-crypto`, which sits *below*
-/// this crate, so it is imported.
+/// rather than asserted. One more per-build ceiling needs no such treatment:
+/// `MAX_AGGREGATED_SIGNATURES`, the ceiling of `required_support`, comes from
+/// `moonblokz-crypto`, which sits *below* this crate, so it is imported.
 ///
 /// These checks are reachable only from acceptance, and structurally so: they live
 /// in separate acceptance-only checks, which the resolution guard never calls. That is the
@@ -269,8 +269,11 @@ pub mod parameter {
     /// Maximum UTXO outputs per block, bounded by the caller's
     /// [`crate::BuildLimits::utxo_unspent_bits`].
     pub const MAX_BLOCK_UTXO_OUTPUT: u8 = 4;
-    /// Maximum aggregated signatures per approval-evidence block (ADR-015).
-    pub const MAX_AGGREGATED_SIGNATURES: u8 = 5;
+    /// FR36 (a) mining reward: FR6 requires a block's `mined_amount` header
+    /// field to equal it. Reassigned from `max_aggregated_signatures` before any
+    /// chain existed (DEC-109); registered by Story 6.4 so the registry stays
+    /// dense, its accessor and FR6 check arrive with Story 7.2.
+    pub const MINING_REWARD: u8 = 5;
     /// FR37 per-credit vote value; also the anti-capture interest denominator.
     pub const VOTE_SCALE: u8 = 6;
     /// FR37 anti-capture vote-interest rate.
@@ -279,9 +282,10 @@ pub mod parameter {
     pub const PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS: u8 = 8;
     /// FR46 module-scope parent-recovery emit cooldown, milliseconds.
     pub const PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS: u8 = 9;
-    /// FR8 / ADR-015 required support count; `m = min(2·this − 1, |A|)`. May be
-    /// computed: its floor is universal and its ceiling is the chain's own
-    /// [`MAX_AGGREGATED_SIGNATURES`], applied as a clamp.
+    /// FR8 / ADR-015 required support count, the cap of the approval threshold
+    /// `r_eff`. Literal-only (DEC-197): `1 ≤ this ≤` the backend's
+    /// `MAX_AGGREGATED_SIGNATURES`, refused at acceptance otherwise (§6 check 3,
+    /// DEC-075).
     pub const REQUIRED_SUPPORT: u8 = 10;
 
     // Radio runtime tuning, 11 through 19. Literal-only by rule (§4.5, §10.2) —
@@ -475,7 +479,7 @@ const REGISTRY: [ParameterSpec; 32] = [
     spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, true, 30_000),
     spec_of(parameter::BLOCK_SIZE_LIMIT, 4, false, 2016),
     spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 2, false, 255),
-    spec_of(parameter::MAX_AGGREGATED_SIGNATURES, 1, false, 50),
+    spec_of(parameter::MINING_REWARD, 4, true, 0),
     spec_of(parameter::VOTE_SCALE, 2, true, 1000),
     spec_of(parameter::VOTE_INTEREST, 1, true, 5),
     spec_of(
@@ -490,7 +494,7 @@ const REGISTRY: [ParameterSpec; 32] = [
         true,
         10_000,
     ),
-    spec_of(parameter::REQUIRED_SUPPORT, 1, true, 3),
+    spec_of(parameter::REQUIRED_SUPPORT, 1, false, 40),
     spec_of(parameter::ECHO_REQUEST_MINIMAL_INTERVAL, 2, false, 1440),
     spec_of(parameter::ECHO_MESSAGES_TARGET_INTERVAL, 1, false, 100),
     spec_of(parameter::ECHO_GATHERING_TIMEOUT, 1, false, 10),
@@ -567,7 +571,7 @@ pub const PARAMETER_COUNT: usize = REGISTRY.len();
 const PER_BUILD_LIMITED_IDS: [u8; 6] = [
     parameter::BLOCK_SIZE_LIMIT,
     parameter::MAX_BLOCK_UTXO_OUTPUT,
-    parameter::MAX_AGGREGATED_SIGNATURES,
+    parameter::REQUIRED_SUPPORT,
     parameter::ACTIVE_CHAIN_LENGTH,
     parameter::VERIFICATION_HORIZON,
     parameter::MAX_NODE_COUNT,
@@ -594,7 +598,7 @@ const _: () = {
 /// [`check_build_limit`] therefore constrains.
 ///
 /// A subset of [`PER_BUILD_LIMITED_IDS`]. Two of that list's members are not here:
-/// `max_aggregated_signatures` is measured against a constant this crate imports
+/// `required_support` is measured against a constant this crate imports
 /// rather than against a [`BuildLimits`] field, so its arm stays in [`check_bound`];
 /// `verification_horizon` is bounded only together with `active_chain_length`, so
 /// its checks live in the two-parameter [`check_window_horizon`].
@@ -646,7 +650,7 @@ const fn is_per_build_limited(id: u8) -> bool {
 // it is the one whose expressibility this crate can pin. The caller's capacities
 // travel in `BuildLimits` and are the caller's to pin, with `limits_are_expressible`.
 const _: () = assert!(ceiling_fits(
-    parameter::MAX_AGGREGATED_SIGNATURES,
+    parameter::REQUIRED_SUPPORT,
     MAX_AGGREGATED_SIGNATURES as u64
 ));
 
@@ -1097,11 +1101,6 @@ impl<'a> ActiveConfig<'a> {
         narrow_u16(self.resolve(parameter::MAX_BLOCK_UTXO_OUTPUT))
     }
 
-    /// Maximum aggregated signatures per approval-evidence block (ADR-015).
-    pub fn max_aggregated_signatures(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::MAX_AGGREGATED_SIGNATURES))
-    }
-
     /// FR37 `vote_scale` — the per-credit vote value, and the anti-capture
     /// interest denominator, which is why zero is refused at acceptance.
     pub fn vote_scale(&self) -> NonZeroU16 {
@@ -1129,24 +1128,17 @@ impl<'a> ActiveConfig<'a> {
         narrow_u32(self.resolve(parameter::PARENT_RECOVERY_MIN_EMIT_INTERVAL_MS))
     }
 
-    /// ADR-015 required support count, **clamped to the chain's own
-    /// `max_aggregated_signatures`**.
+    /// ADR-015 `required_support`, the cap of the approval threshold:
+    /// `r_eff = min(required_support, ⌊|A'|/2⌋ + 1)` and
+    /// `m = min(2·r_eff − 1, |A'|)` (DEC-172).
     ///
-    /// The clamp is what lets this parameter be computed. Its floor (`>= 1`) is
-    /// universal, so the resolution guard can enforce it on a computed value; its
-    /// ceiling is not — only the *chain* may state it, because a ceiling taken from
-    /// a build constant would make the clamp decision differ between builds. So the
-    /// chain declares the ceiling as a literal (identifier 5, bound-checked against
-    /// the backend at acceptance, where the answer to a value this build cannot
-    /// honour is rejection rather than substitution), and the clamp reads it back
-    /// from the same content every node holds.
-    ///
-    /// Clamping rather than falling back is deliberate, and matches ADR-015's own
-    /// `m = min(2·required_support − 1, |A|)`: it keeps a computed value's intent —
-    /// grow with the network, never exceed what the evidence can carry — where a
-    /// fallback would discard the computation for the code-baked default.
+    /// Literal-only, so it binds no chain state (DEC-197). Acceptance refuses a
+    /// value outside `1 ..= MAX_AGGREGATED_SIGNATURES` (§6 check 3, DEC-075), and
+    /// an absent entry is measured there by its default, so a build that cannot
+    /// aggregate 40 signatures refuses a chain that keeps it (DEC-173). There is
+    /// no clamp: every value that reaches this accessor is one the build honours.
     pub fn required_support(&self) -> u8 {
-        narrow_u8(self.resolve(parameter::REQUIRED_SUPPORT)).min(self.max_aggregated_signatures())
+        narrow_u8(self.resolve(parameter::REQUIRED_SUPPORT))
     }
 
     /// FR45 (a) block fill threshold, percent.
@@ -1546,7 +1538,7 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
     // What that leaves uncovered is bounded by the registry's own value forms.
     // Every parameter whose bound must hold for the local node to *represent* the
     // chain at all — the spent-bit width, the active-chain capacity, the
-    // verification horizon, the aggregation ceiling, the vote denominator, the
+    // verification horizon, the support threshold, the vote denominator, the
     // execution budget — is
     // literal-only, so its declared value is checked below. The one bounded
     // parameter that does admit a program (`block_fill_threshold_percent`) can
@@ -1560,6 +1552,7 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
     let mut horizon = None;
     // Bit `i` is set when the content declares `CALLER_LIMITED_IDS[i]`.
     let mut caller_limited_declared = 0u8;
+    let mut required_support_declared = false;
 
     for entry in view.iter() {
         if entry.is_bytecode() {
@@ -1583,6 +1576,7 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
             parameter::TX_FEE_PER_BYTE_MAX => tx_fee_max = Some(declared),
             parameter::ACTIVE_CHAIN_LENGTH => window = Some(declared),
             parameter::VERIFICATION_HORIZON => horizon = Some(declared),
+            parameter::REQUIRED_SUPPORT => required_support_declared = true,
             _ => {}
         }
     }
@@ -1598,6 +1592,17 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
         if caller_limited_declared & (1 << index) == 0 {
             check_build_limit(id, spec(id).fallback, limits)?;
         }
+    }
+    // The same holds for the one per-build ceiling this crate imports: an absent
+    // `required_support` resolves to its default of 40, so a backend that cannot
+    // aggregate 40 signatures refuses the chain (DEC-173). It is a runtime check,
+    // not a compile-time assertion, because such a build must still accept a
+    // chain that declares a value it can honour.
+    if !required_support_declared {
+        check_bound(
+            parameter::REQUIRED_SUPPORT,
+            spec(parameter::REQUIRED_SUPPORT).fallback,
+        )?;
     }
 
     // Pass 3 — the invariants that span two parameters, and therefore cannot live
@@ -1655,10 +1660,11 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
 /// capacity — IDs 3, 4, 21, 30 and 32 — are literal-only: their limits are the caller's
 /// build's, so the decision has to stay at acceptance, where the answer is
 /// rejection rather than substitution. Their checks live in separate
-/// acceptance-only functions, so this one cannot reach them even by mistake. Every bound this function can reach is universal — 0, 1, 100, and
-/// the block format's own `HEADER_SIZE`. ID 10's ceiling was
-/// the one exception and is no longer here: it became a clamp against the chain's
-/// own declared value instead (see [`ActiveConfig::required_support`]).
+/// acceptance-only functions, so this one cannot reach them even by mistake. Every
+/// bound a *computed* value can meet here is universal — 0, 1, 100, and the block
+/// format's own `HEADER_SIZE`. The one per-build ceiling in [`check_bound`], ID
+/// 10's `MAX_AGGREGATED_SIGNATURES`, belongs to a literal-only parameter, so no
+/// program ever reaches it.
 fn bounded(id: u8, value: u64) -> Option<u64> {
     match check_bound(id, value) {
         Ok(()) => Some(value),
@@ -1683,22 +1689,15 @@ fn check_bound(id: u8, declared: u64) -> Result<(), ChainConfigError> {
         // Universal, so it lives here; the *ceiling* is the caller's build's and
         // lives in `check_build_limit`.
         parameter::MAX_BLOCK_UTXO_OUTPUT => declared >= 1,
-        // FR8 / ADR-015: below 1, `m = min(2·required_support − 1, |A|)` yields
-        // `m = -1`. Only the floor lives here, and deliberately so: it is universal,
-        // so the resolution guard may enforce it on a computed value. The ceiling is
-        // the chain's own `max_aggregated_signatures`, applied as a clamp by the
-        // accessor — see [`ActiveConfig::required_support`].
-        parameter::REQUIRED_SUPPORT => declared >= 1,
-        // ADR-015: the chain states how many signatures an approval-evidence
-        // block may carry; this build states how many it can aggregate and
-        // verify. A chain above the local ceiling produces evidence this node
-        // could never check.
+        // FR8 / ADR-015, §6 checks 2 and 3: below 1 there is no approval
+        // threshold; above the backend's ceiling an approval-evidence block would
+        // carry more signatures than this node can aggregate and verify.
         //
-        // The only per-build limit left in this function, and reachable only from
+        // The only per-build limit in this function, reachable only from
         // acceptance because the parameter is literal-only (`PER_BUILD_LIMITED_IDS`
-        // asserts that). It is also the ceiling `required_support` clamps to, which
-        // is why the clamp is chain-determined rather than build-determined.
-        parameter::MAX_AGGREGATED_SIGNATURES => {
+        // asserts that). The ceiling is imported, not caller-supplied, so the arm
+        // lives here rather than in `check_build_limit` (spec §4.5 rule 4).
+        parameter::REQUIRED_SUPPORT => {
             declared >= 1 && declared <= MAX_AGGREGATED_SIGNATURES as u64
         }
         // FR37: the denominator of the anti-capture rule.
