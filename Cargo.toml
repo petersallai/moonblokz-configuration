@@ -23,23 +23,14 @@ moonblokz-vm = { path = "../moonblokz-vm", default-features = false }
 
 [features]
 # The crypto backend is forwarded to `moonblokz-chain-types` and
-# `moonblokz-crypto`. Exactly one must be active; the default is the
-# embedded-oriented crypto-bigint backend.
-default = ["schnorr-crypto-bigint", "block-size-2016"]
+# `moonblokz-crypto`. Exactly one signature scheme must be active (DEC-246);
+# the default is `schnorr`.
+default = ["schnorr", "block-size-2016"]
 block-size-2016 = ["moonblokz-chain-types/block-size-2016"]
 block-size-65536 = ["moonblokz-chain-types/block-size-65536"]
-schnorr-crypto-bigint = [
-    "moonblokz-chain-types/schnorr-crypto-bigint",
-    "moonblokz-crypto/schnorr-crypto-bigint",
-]
-schnorr-malachite = [
-    "moonblokz-chain-types/schnorr-malachite",
-    "moonblokz-crypto/schnorr-malachite",
-]
-schnorr-num-bigint-dig = [
-    "moonblokz-chain-types/schnorr-num-bigint-dig",
-    "moonblokz-crypto/schnorr-num-bigint-dig",
-]
+schnorr = ["moonblokz-chain-types/schnorr", "moonblokz-crypto/schnorr"]
+bls-min-sig = ["moonblokz-chain-types/bls-min-sig", "moonblokz-crypto/bls-min-sig"]
+bls-min-pk = ["moonblokz-chain-types/bls-min-pk", "moonblokz-crypto/bls-min-pk"]
 
 # The host-side `config-encoder` is a separate package rather than a feature of
 # this one. Cargo unifies features per package, so a `std` tool target sharing
