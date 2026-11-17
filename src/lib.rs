@@ -119,6 +119,14 @@ pub struct BuildLimits {
     /// consensus rule every node applies alike. A chain declaring more than this
     /// cannot be represented, so the acceptance pass rejects it (§6 check 18).
     pub node_count_max: u32,
+
+    /// Signature scheme of the local build (`moonblokz_crypto::SIGNATURE_SCHEME`):
+    /// 0 `schnorr`, 1 `bls-min-sig`, 2 `bls-min-pk`.
+    ///
+    /// The chain names its scheme in `signature_scheme` (ID 33); a node built for
+    /// another scheme cannot even frame the chain's blocks, so the acceptance pass
+    /// refuses the chain (§6 check 19, an equality, DEC-252).
+    pub signature_scheme: u8,
 }
 
 /// Whether `limits` leaves a bound violation expressible in the declared width of
@@ -149,6 +157,7 @@ pub struct BuildLimits {
 ///     max_blocks: 600,
 ///     block_size_max: 2016,
 ///     node_count_max: 1000,
+///     signature_scheme: 0,
 /// };
 /// const _: () = assert!(limits_are_expressible(LIMITS));
 /// ```
@@ -345,6 +354,11 @@ pub mod parameter {
     /// registration or balance block beyond it is exact evidence. Bounded by the
     /// caller's [`crate::BuildLimits::node_count_max`]. Literal-only.
     pub const MAX_NODE_COUNT: u8 = 32;
+    /// The chain's signature scheme (DEC-252): 0 `schnorr`, 1 `bls-min-sig`,
+    /// 2 `bls-min-pk`. Must equal the caller's
+    /// [`crate::BuildLimits::signature_scheme`] (§6 check 19); a chain that omits it
+    /// is a `schnorr` chain. Literal-only.
+    pub const SIGNATURE_SCHEME: u8 = 33;
 }
 
 /// The chain-info space (specification §4.6): quantities a program may read from
@@ -474,7 +488,7 @@ const fn spec_of_program(
 
 /// The registry, in identifier order. See [`parameter`] for the identifiers and
 /// the wire-format rules that govern them.
-const REGISTRY: [ParameterSpec; 32] = [
+const REGISTRY: [ParameterSpec; 33] = [
     spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, true, 60_000),
     spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, true, 30_000),
     spec_of(parameter::BLOCK_SIZE_LIMIT, 4, false, 2016),
@@ -536,6 +550,7 @@ const REGISTRY: [ParameterSpec; 32] = [
     spec_of(parameter::VERIFICATION_HORIZON, 4, false, 50),
     spec_of(parameter::GRACE_PERIOD_STEP_MS, 4, true, 900_000),
     spec_of(parameter::MAX_NODE_COUNT, 4, false, 1000),
+    spec_of(parameter::SIGNATURE_SCHEME, 1, false, 0),
 ];
 
 // Identifiers are allocated densely from 1, so the record for an identifier sits
@@ -568,13 +583,14 @@ pub const PARAMETER_COUNT: usize = REGISTRY.len();
 /// with a *different value* than a differently-built node resolves, with no error
 /// on either side. Admitting a program here would put the bound on the resolution
 /// path, so the form is the enforcement.
-const PER_BUILD_LIMITED_IDS: [u8; 6] = [
+const PER_BUILD_LIMITED_IDS: [u8; 7] = [
     parameter::BLOCK_SIZE_LIMIT,
     parameter::MAX_BLOCK_UTXO_OUTPUT,
     parameter::REQUIRED_SUPPORT,
     parameter::ACTIVE_CHAIN_LENGTH,
     parameter::VERIFICATION_HORIZON,
     parameter::MAX_NODE_COUNT,
+    parameter::SIGNATURE_SCHEME,
 ];
 
 const _: () = {
@@ -609,11 +625,12 @@ const _: () = {
 /// `every_caller_limited_identifier_is_constrained` drives a case per entry through
 /// [`check_build_limit`] in both directions, so the list and the function cannot
 /// drift apart: an entry with no arm fails, and an arm with no entry fails.
-const CALLER_LIMITED_IDS: [u8; 4] = [
+const CALLER_LIMITED_IDS: [u8; 5] = [
     parameter::BLOCK_SIZE_LIMIT,
     parameter::MAX_BLOCK_UTXO_OUTPUT,
     parameter::ACTIVE_CHAIN_LENGTH,
     parameter::MAX_NODE_COUNT,
+    parameter::SIGNATURE_SCHEME,
 ];
 
 const _: () = {
@@ -1765,6 +1782,9 @@ fn check_build_limit(id: u8, declared: u64, limits: BuildLimits) -> Result<(), C
         // §6 check 18: the chain's node cap must fit the node-indexed arrays this
         // build allocated (DEC-228). Above it a registration would have no slot.
         parameter::MAX_NODE_COUNT => declared <= limits.node_count_max as u64,
+        // §6 check 19: the chain's signature scheme must be this build's (DEC-252).
+        // An equality, not a ceiling: a different scheme has different wire sizes.
+        parameter::SIGNATURE_SCHEME => declared == limits.signature_scheme as u64,
         _ => true,
     };
 

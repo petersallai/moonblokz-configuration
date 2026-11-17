@@ -61,6 +61,8 @@ const REFERENCE_BUILD_LIMITS: BuildLimits = BuildLimits {
     max_blocks: 600,
     block_size_max: 2016,
     node_count_max: 1000,
+    // The scheme this encoder was built for: it founds chains of that scheme only.
+    signature_scheme: moonblokz_crypto::SIGNATURE_SCHEME,
 };
 
 const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
@@ -74,7 +76,7 @@ const _: () = assert!(limits_are_expressible(REFERENCE_BUILD_LIMITS));
 /// together so they cannot drift.
 ///
 /// [`names_match_the_registry`]: #
-pub const NAMES: [(&str, u8); 32] = [
+pub const NAMES: [(&str, u8); 33] = [
     (
         "inter_block_interval_ms",
         parameter::INTER_BLOCK_INTERVAL_MS,
@@ -143,6 +145,7 @@ pub const NAMES: [(&str, u8); 32] = [
     ("verification_horizon", parameter::VERIFICATION_HORIZON),
     ("grace_period_step_ms", parameter::GRACE_PERIOD_STEP_MS),
     ("max_node_count", parameter::MAX_NODE_COUNT),
+    ("signature_scheme", parameter::SIGNATURE_SCHEME),
 ];
 
 /// The registry identifier a name refers to.
@@ -217,6 +220,26 @@ pub fn encode(source: &str, private_key: [u8; PRIVATE_KEY_SIZE]) -> Result<Vec<u
                 "cannot frame this entry — the parameter is already set, or the override set no longer fits one chain-config payload",
             )
         })?;
+    }
+    // A chain names its signature scheme (ID 33, DEC-252), and this build can found
+    // chains of its own scheme only. A Schnorr build relies on the default 0, so its
+    // output is unchanged; a BLS build writes its scheme when the input omits it.
+    let declares_scheme = overrides
+        .iter()
+        .any(|o| o.id == parameter::SIGNATURE_SCHEME);
+    if moonblokz_crypto::SIGNATURE_SCHEME != 0 && !declares_scheme {
+        builder
+            .add_literal(
+                parameter::SIGNATURE_SCHEME,
+                &[moonblokz_crypto::SIGNATURE_SCHEME],
+            )
+            .ok()
+            .ok_or_else(|| {
+                err(
+                    0,
+                    "the signature scheme no longer fits one chain-config payload",
+                )
+            })?;
     }
 
     let crypto = Crypto::new(private_key)
@@ -890,6 +913,36 @@ mod tests {
                 .vote_interest(),
             4
         );
+    }
+
+    /// DEC-252: an encoder founds chains of its own scheme only. A Schnorr build writes
+    /// no ID 33 (the default is 0); a BLS build writes its scheme; another scheme is
+    /// refused by the acceptance pass (§6 check 19).
+    #[test]
+    fn the_encoder_founds_a_chain_of_its_own_scheme() {
+        let payload = encode("vote_interest = 3\n", KEY).expect("encodes");
+        let view = moonblokz_chain_types::ChainConfigBlockPayloadView::from_payload(&payload)
+            .expect("framing is well formed");
+        let declared = view
+            .iter()
+            .find(|entry| entry.parameter_id() == parameter::SIGNATURE_SCHEME)
+            .map(|entry| entry.value()[0]);
+        if moonblokz_crypto::SIGNATURE_SCHEME == 0 {
+            assert_eq!(declared, None);
+        } else {
+            assert_eq!(declared, Some(moonblokz_crypto::SIGNATURE_SCHEME));
+        }
+        let own = format!(
+            "signature_scheme = {}\n",
+            moonblokz_crypto::SIGNATURE_SCHEME
+        );
+        assert!(encode(&own, KEY).is_ok());
+        let other = format!(
+            "signature_scheme = {}\n",
+            (moonblokz_crypto::SIGNATURE_SCHEME + 1) % 3
+        );
+        let error = encode(&other, KEY).expect_err("another scheme");
+        assert!(error.message.contains("structural bound"));
     }
 
     #[test]
