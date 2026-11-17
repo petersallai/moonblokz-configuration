@@ -44,6 +44,7 @@ const TEST_LIMITS: BuildLimits = BuildLimits {
     max_blocks: 600,
     block_size_max: MAX_BLOCK_SIZE as u32,
     node_count_max: 1000,
+    signature_scheme: 0,
 };
 
 const _: () = assert!(limits_are_expressible(TEST_LIMITS));
@@ -908,6 +909,7 @@ fn every_caller_limited_identifier_is_constrained() {
         max_blocks: 0,
         block_size_max: 0,
         node_count_max: 0,
+        signature_scheme: 0,
     };
     for id in CALLER_LIMITED_IDS {
         assert!(
@@ -998,6 +1000,7 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
         max_blocks: 600,
         block_size_max: 2016,
         node_count_max: 1000,
+        signature_scheme: 0,
     };
     assert!(super::accept_content(empty.as_slice(), at_defaults).is_ok());
 
@@ -1025,8 +1028,54 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
         max_blocks: 599,
         block_size_max: 2016,
         node_count_max: 1000,
+        signature_scheme: 0,
     };
     assert!(super::accept_content(fits_both.as_slice(), small_build).is_ok());
+}
+
+/// DEC-252: the chain names its signature scheme in ID 33 and the build must match it
+/// (§6 check 19, an equality). An absent entry is a `schnorr` chain (default 0).
+#[test]
+fn signature_scheme_must_equal_the_build_scheme() {
+    let scheme = |n: u8| frame(&[Entry::Literal(parameter::SIGNATURE_SCHEME, &[n])]);
+    let refused = |payload: &[u8], limits: BuildLimits| {
+        matches!(
+            super::accept_content(payload, limits),
+            Err(ChainConfigError::BoundViolation(
+                parameter::SIGNATURE_SCHEME
+            ))
+        )
+    };
+    for build in 0..=2u8 {
+        let limits = BuildLimits {
+            signature_scheme: build,
+            ..TEST_LIMITS
+        };
+        for declared in 0..=3u8 {
+            if declared == build {
+                assert!(super::accept_content(scheme(declared).as_slice(), limits).is_ok());
+            } else {
+                assert!(refused(scheme(declared).as_slice(), limits));
+            }
+        }
+        // Absent: measured by its default, 0 (`schnorr`).
+        if build == 0 {
+            assert!(super::accept_content(frame(&[]).as_slice(), limits).is_ok());
+        } else {
+            assert!(refused(frame(&[]).as_slice(), limits));
+        }
+    }
+    // A bytecode entry is refused: the parameter is literal-only.
+    let program = frame(&[Entry::Bytecode(
+        parameter::SIGNATURE_SCHEME,
+        &PUSH_41_PROGRAM,
+    )]);
+    assert!(matches!(
+        super::accept_content(program.as_slice(), TEST_LIMITS),
+        Err(ChainConfigError::BytecodeNotPermitted(
+            parameter::SIGNATURE_SCHEME
+        ))
+    ));
 }
 
 /// A capacity at the top of its parameter's four-byte width would make a
