@@ -861,7 +861,15 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
     // `H ≥ 3` dividing `W`, and check 15 for `H < W`, so 2 to 5 admit none.
     for w in 2u32..6 {
         for h in 1..w {
-            assert!(accept_content(window_and_horizon(Some(w), Some(h)).as_slice()).is_err());
+            assert!(
+                matches!(
+                    accept_content(window_and_horizon(Some(w), Some(h)).as_slice()),
+                    Err(ChainConfigError::BoundViolation(
+                        parameter::VERIFICATION_HORIZON
+                    ))
+                ),
+                "W = {w}, H = {h}"
+            );
         }
     }
     let at_six = frame(&[
@@ -1234,7 +1242,7 @@ fn verification_horizon_is_bounded_by_the_window_and_the_block_storage() {
 }
 
 #[test]
-fn the_horizon_divides_the_window_and_is_at_least_two() {
+fn the_horizon_divides_the_window_and_is_at_least_three() {
     // §6 check 21 (D8, DEC-265): the clean-slot rule needs `H ≥ 3` and `H | W`.
     let refused = |payload: &[u8]| {
         matches!(
@@ -1315,6 +1323,15 @@ fn the_block_size_limit_holds_an_evidence_fixed_part() {
     assert!(need(default_r) <= default_limit);
     assert!(accept_content(content(None, Some(default_r as u8)).as_slice()).is_ok());
     assert!(accept_content(frame(&[]).as_slice()).is_ok());
+    // The largest threshold against the default limit: accepted exactly when
+    // its fixed part fits (scheme-dependent).
+    let max_r = MAX_AGGREGATED_SIGNATURES;
+    let at_max = content(None, Some(max_r as u8));
+    if need(max_r) <= default_limit {
+        assert!(accept_content(at_max.as_slice()).is_ok());
+    } else {
+        assert!(refused(at_max.as_slice()));
+    }
 }
 
 #[test]
