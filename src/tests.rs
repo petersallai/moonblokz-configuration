@@ -857,18 +857,18 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
             ))
         ));
     }
-    // The smallest acceptable window is 4 with a horizon of 2: check 21 asks for
-    // `H ≥ 2` dividing `W`, and check 15 for `H < W`, so 2 and 3 admit none.
-    for w in [2u32, 3] {
+    // The smallest acceptable window is 6 with a horizon of 3: check 21 asks for
+    // `H ≥ 3` dividing `W`, and check 15 for `H < W`, so 2 to 5 admit none.
+    for w in 2u32..6 {
         for h in 1..w {
             assert!(accept_content(window_and_horizon(Some(w), Some(h)).as_slice()).is_err());
         }
     }
-    let at_four = frame(&[
-        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &4u32.to_le_bytes()),
-        Entry::Literal(parameter::VERIFICATION_HORIZON, &2u32.to_le_bytes()),
+    let at_six = frame(&[
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &6u32.to_le_bytes()),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &3u32.to_le_bytes()),
     ]);
-    assert!(accept_content(at_four.as_slice()).is_ok());
+    assert!(accept_content(at_six.as_slice()).is_ok());
 
     let zero = frame(&[Entry::Literal(
         parameter::ACTIVE_CHAIN_LENGTH,
@@ -1235,7 +1235,7 @@ fn verification_horizon_is_bounded_by_the_window_and_the_block_storage() {
 
 #[test]
 fn the_horizon_divides_the_window_and_is_at_least_two() {
-    // §6 check 21 (D8, DEC-265): the clean-slot rule needs `H ≥ 2` and `H | W`.
+    // §6 check 21 (D8, DEC-265): the clean-slot rule needs `H ≥ 3` and `H | W`.
     let refused = |payload: &[u8]| {
         matches!(
             accept_content(payload),
@@ -1254,10 +1254,12 @@ fn the_horizon_divides_the_window_and_is_at_least_two() {
     assert!(refused(declared(Some(500), Some(30)).as_slice()));
     assert!(refused(declared(None, Some(30)).as_slice()));
     assert!(refused(declared(Some(490), None).as_slice()));
-    // `H = 1` divides every window but makes every position a slot, genesis
-    // included; `H = 2` is the smallest horizon accepted.
-    assert!(refused(declared(Some(8), Some(1)).as_slice()));
-    assert!(accept_content(declared(Some(8), Some(2)).as_slice()).is_ok());
+    // `H = 1` makes every position a slot and `H = 2` makes block #1 (the
+    // chain-config block, never clean) a slot; `H = 3` is the smallest horizon
+    // accepted.
+    assert!(refused(declared(Some(12), Some(1)).as_slice()));
+    assert!(refused(declared(Some(12), Some(2)).as_slice()));
+    assert!(accept_content(declared(Some(12), Some(3)).as_slice()).is_ok());
 }
 
 #[test]

@@ -1813,18 +1813,19 @@ fn check_build_limit(id: u8, declared: u64, limits: BuildLimits) -> Result<(), C
 ///   ancestor one block below the window, which the in-place walk cannot take.
 /// - **16, `w + 2·h ≤ max_blocks`:** the window, the horizon and one competing
 ///   branch of depth `h` must fit the caller's block storage.
-/// - **21, `h ≥ 2` and `w mod h == 0` (D8, DEC-265):** the clean-slot rule
+/// - **21, `h ≥ 3` and `w mod h == 0` (D8, DEC-265):** the clean-slot rule
 ///   (every block at `s ≡ h − 1 (mod h)` is clean) needs the block a slot drops,
-///   `s − w`, to be a slot itself, and at `h = 1` every position, genesis
-///   included, would be a slot. Check 14 (`h ≥ 1`) has already run, so the
-///   modulus is never by zero.
+///   `s − w`, to be a slot itself, and genesis off the slots: block #1 is the
+///   chain-config block (FR54), never clean, and at `h = 2` it would be a slot
+///   (at `h = 1` every position would). Check 14 (`h ≥ 1`) has already run, so
+///   the modulus is never by zero.
 ///
 /// Acceptance-only, like [`check_build_limit`]: check 16 measures the caller's
 /// build, and the resolution guard has no `BuildLimits` to reach it with. Both
 /// parameters are literal-only, so the values here are the ones the chain
 /// resolves. A violation names the horizon, the parameter all three constrain.
 fn check_window_horizon(w: u64, h: u64, limits: BuildLimits) -> Result<(), ChainConfigError> {
-    if h < w && h >= 2 && w.is_multiple_of(h) && w + 2 * h <= limits.max_blocks as u64 {
+    if h < w && h >= 3 && w.is_multiple_of(h) && w + 2 * h <= limits.max_blocks as u64 {
         Ok(())
     } else {
         Err(ChainConfigError::BoundViolation(
