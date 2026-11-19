@@ -798,9 +798,10 @@ fn block_size_limit_is_bounded_by_the_build_block_buffer() {
     assert!(limits_are_expressible(extreme_build));
     let extreme = frame(&[
         Entry::Literal(parameter::BLOCK_SIZE_LIMIT, &(u32::MAX - 1).to_le_bytes()),
+        // `W` a multiple of `H` (check 21), with `W + 2·H` below the capacity.
         Entry::Literal(
             parameter::ACTIVE_CHAIN_LENGTH,
-            &(u32::MAX - 201).to_le_bytes(),
+            &(u32::MAX - 295).to_le_bytes(),
         ),
         Entry::Literal(parameter::VERIFICATION_HORIZON, &100u32.to_le_bytes()),
         Entry::Literal(parameter::MAX_NODE_COUNT, &(u32::MAX - 1).to_le_bytes()),
@@ -809,12 +810,10 @@ fn block_size_limit_is_bounded_by_the_build_block_buffer() {
 
     // The floor is universal (check 10): a limit that cannot admit a header
     // admits no block at all, and every remaining-capacity computation against
-    // it underflows.
-    let above_header = frame(&[Entry::Literal(
-        parameter::BLOCK_SIZE_LIMIT,
-        &(HEADER_SIZE as u32 + 1).to_le_bytes(),
-    )]);
-    assert!(accept_content(above_header.as_slice()).is_ok());
+    // it underflows. Acceptance now asks for more than the floor (check 20: an
+    // evidence's fixed part must fit), so the floor is pinned on the guard.
+    assert!(check_bound(parameter::BLOCK_SIZE_LIMIT, HEADER_SIZE as u64 + 1).is_ok());
+    assert!(check_bound(parameter::BLOCK_SIZE_LIMIT, HEADER_SIZE as u64).is_err());
 
     let at_header = frame(&[Entry::Literal(
         parameter::BLOCK_SIZE_LIMIT,
@@ -858,12 +857,26 @@ fn active_chain_length_is_bounded_by_the_compile_time_capacity() {
             ))
         ));
     }
-    // The smallest acceptable window holds one horizon block below it.
-    let at_two = frame(&[
-        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &2u32.to_le_bytes()),
-        Entry::Literal(parameter::VERIFICATION_HORIZON, &1u32.to_le_bytes()),
+    // The smallest acceptable window is 6 with a horizon of 3: check 21 asks for
+    // `H ≥ 3` dividing `W`, and check 15 for `H < W`, so 2 to 5 admit none.
+    for w in 2u32..6 {
+        for h in 1..w {
+            assert!(
+                matches!(
+                    accept_content(window_and_horizon(Some(w), Some(h)).as_slice()),
+                    Err(ChainConfigError::BoundViolation(
+                        parameter::VERIFICATION_HORIZON
+                    ))
+                ),
+                "W = {w}, H = {h}"
+            );
+        }
+    }
+    let at_six = frame(&[
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &6u32.to_le_bytes()),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &3u32.to_le_bytes()),
     ]);
-    assert!(accept_content(at_two.as_slice()).is_ok());
+    assert!(accept_content(at_six.as_slice()).is_ok());
 
     let zero = frame(&[Entry::Literal(
         parameter::ACTIVE_CHAIN_LENGTH,
@@ -1018,10 +1031,11 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
     // Declaring a value the build can hold is what such a build needs, and the
     // default it replaces is then not measured at all.
     let fits_both = frame(&[
-        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &499u32.to_le_bytes()),
+        Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &450u32.to_le_bytes()),
         Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &254u16.to_le_bytes()),
     ]);
-    // `W = 499` with the default `H = 50` needs `499 + 2·50` blocks of storage.
+    // `W = 450` (a multiple of the default `H = 50`, check 21) needs
+    // `450 + 2·50` blocks of storage.
     let small_build = BuildLimits {
         utxo_unspent_bits: 254,
         snake_chain_length_max: 499,
@@ -1175,15 +1189,16 @@ fn verification_horizon_is_bounded_by_the_window_and_the_block_storage() {
     assert!(check_bound(parameter::VERIFICATION_HORIZON, 0).is_err());
     assert!(check_bound(parameter::VERIFICATION_HORIZON, 1).is_ok());
 
-    // Check 15: `H < W` (DEC-207). `H = W − 1` holds; `H = W` does not.
-    assert!(super::accept_content(declared(Some(100), Some(99)).as_slice(), TEST_LIMITS).is_ok());
+    // Check 15: `H < W` (DEC-207). The largest divisor below `W` holds; `H = W`
+    // does not.
+    assert!(super::accept_content(declared(Some(100), Some(50)).as_slice(), TEST_LIMITS).is_ok());
     assert!(refused(
         declared(Some(100), Some(100)).as_slice(),
         TEST_LIMITS
     ));
     // An absent `H` is measured by its default: 50 is not below a window of 50.
     assert!(refused(declared(Some(50), None).as_slice(), TEST_LIMITS));
-    assert!(super::accept_content(declared(Some(51), None).as_slice(), TEST_LIMITS).is_ok());
+    assert!(super::accept_content(declared(Some(100), None).as_slice(), TEST_LIMITS).is_ok());
 
     // Check 16: `W + 2·H ≤ max_blocks`, declared and absent alike. The defaults
     // (500 + 2·50) fill the reference build exactly.
@@ -1194,12 +1209,13 @@ fn verification_horizon_is_bounded_by_the_window_and_the_block_storage() {
     let empty = frame(&[]);
     assert!(super::accept_content(empty.as_slice(), TEST_LIMITS).is_ok());
     assert!(refused(empty.as_slice(), one_short));
+    // Every pair below satisfies checks 15 and 21, so only check 16 decides.
     let at_capacity = declared(Some(400), Some(100));
     assert!(super::accept_content(at_capacity.as_slice(), TEST_LIMITS).is_ok());
-    let over_capacity = declared(Some(400), Some(101));
+    let over_capacity = declared(Some(400), Some(200));
     assert!(refused(over_capacity.as_slice(), TEST_LIMITS));
-    assert!(super::accept_content(declared(Some(401), Some(99)).as_slice(), one_short).is_ok());
-    assert!(refused(declared(Some(402), Some(99)).as_slice(), one_short));
+    assert!(refused(at_capacity.as_slice(), one_short));
+    assert!(super::accept_content(declared(Some(396), Some(99)).as_slice(), one_short).is_ok());
 
     // Four bytes wide (DEC-227): a window above `u16` is accepted when the
     // build holds it, and read back unchanged.
@@ -1210,19 +1226,112 @@ fn verification_horizon_is_bounded_by_the_window_and_the_block_storage() {
     };
     assert!(super::accept_content(declared(Some(70_000), Some(50)).as_slice(), wide_build).is_ok());
     assert!(refused(
-        declared(Some(70_000), Some(51)).as_slice(),
+        declared(Some(70_000), Some(100)).as_slice(),
         wide_build
     ));
 
     // The accessor reads a declared value back.
     let module = loaded(&[
         Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &8u32.to_le_bytes()),
-        Entry::Literal(parameter::VERIFICATION_HORIZON, &3u32.to_le_bytes()),
+        Entry::Literal(parameter::VERIFICATION_HORIZON, &4u32.to_le_bytes()),
     ]);
     let config = module
         .active_configuration()
         .expect("content is loaded, so a handle is available");
-    assert_eq!(config.verification_horizon(), 3);
+    assert_eq!(config.verification_horizon(), 4);
+}
+
+#[test]
+fn the_horizon_divides_the_window_and_is_at_least_three() {
+    // §6 check 21 (D8, DEC-265): the clean-slot rule needs `H ≥ 3` and `H | W`.
+    let refused = |payload: &[u8]| {
+        matches!(
+            accept_content(payload),
+            Err(ChainConfigError::BoundViolation(
+                parameter::VERIFICATION_HORIZON
+            ))
+        )
+    };
+    let declared = window_and_horizon;
+    // The defaults divide (500 mod 50 = 0), declared or absent.
+    assert!(accept_content(frame(&[]).as_slice()).is_ok());
+    assert!(accept_content(declared(Some(500), Some(50)).as_slice()).is_ok());
+    assert!(accept_content(declared(Some(500), None).as_slice()).is_ok());
+    assert!(accept_content(declared(None, Some(50)).as_slice()).is_ok());
+    // A non-divisor is refused, declared or by the default on either side.
+    assert!(refused(declared(Some(500), Some(30)).as_slice()));
+    assert!(refused(declared(None, Some(30)).as_slice()));
+    assert!(refused(declared(Some(490), None).as_slice()));
+    // `H = 1` makes every position a slot and `H = 2` makes block #1 (the
+    // chain-config block, never clean) a slot; `H = 3` is the smallest horizon
+    // accepted.
+    assert!(refused(declared(Some(12), Some(1)).as_slice()));
+    assert!(refused(declared(Some(12), Some(2)).as_slice()));
+    assert!(accept_content(declared(Some(12), Some(3)).as_slice()).is_ok());
+}
+
+#[test]
+fn the_block_size_limit_holds_an_evidence_fixed_part() {
+    // §6 check 20 (DEC-257): `block_size_limit ≥ HEADER_SIZE +
+    // approval_fixed_size(2·r − 1, r)`, measured on declared-or-default values.
+    let refused = |payload: &[u8]| {
+        matches!(
+            accept_content(payload),
+            Err(ChainConfigError::BoundViolation(
+                parameter::BLOCK_SIZE_LIMIT
+            ))
+        )
+    };
+    let need = |r: usize| (HEADER_SIZE + approval_fixed_size(2 * r - 1, r)) as u32;
+    let content = |limit: Option<u32>, r: Option<u8>| {
+        let limit = limit.map(u32::to_le_bytes);
+        let r = r.map(|r| [r]);
+        let mut entries = [
+            Entry::Literal(parameter::BLOCK_SIZE_LIMIT, &[]),
+            Entry::Literal(parameter::REQUIRED_SUPPORT, &[]),
+        ];
+        let mut n = 0;
+        if let Some(limit) = limit.as_ref() {
+            entries[n] = Entry::Literal(parameter::BLOCK_SIZE_LIMIT, limit);
+            n += 1;
+        }
+        if let Some(r) = r.as_ref() {
+            entries[n] = Entry::Literal(parameter::REQUIRED_SUPPORT, r);
+            n += 1;
+        }
+        frame(&entries[..n])
+    };
+    let default_r = spec(parameter::REQUIRED_SUPPORT).fallback as usize;
+    for r in [1usize, default_r, MAX_AGGREGATED_SIGNATURES] {
+        let r8 = Some(r as u8);
+        // At the boundary and one byte under it.
+        assert!(
+            accept_content(content(Some(need(r)), r8).as_slice()).is_ok(),
+            "r = {r}"
+        );
+        assert!(
+            refused(content(Some(need(r) - 1), r8).as_slice()),
+            "r = {r}"
+        );
+    }
+    // An absent `required_support` is measured by its default of 40.
+    assert!(accept_content(content(Some(need(default_r)), None).as_slice()).is_ok());
+    assert!(refused(content(Some(need(default_r) - 1), None).as_slice()));
+    // An absent limit is measured by its default of 2016, which holds the
+    // default threshold under every scheme.
+    let default_limit = spec(parameter::BLOCK_SIZE_LIMIT).fallback as u32;
+    assert!(need(default_r) <= default_limit);
+    assert!(accept_content(content(None, Some(default_r as u8)).as_slice()).is_ok());
+    assert!(accept_content(frame(&[]).as_slice()).is_ok());
+    // The largest threshold against the default limit: accepted exactly when
+    // its fixed part fits (scheme-dependent).
+    let max_r = MAX_AGGREGATED_SIGNATURES;
+    let at_max = content(None, Some(max_r as u8));
+    if need(max_r) <= default_limit {
+        assert!(accept_content(at_max.as_slice()).is_ok());
+    } else {
+        assert!(refused(at_max.as_slice()));
+    }
 }
 
 #[test]

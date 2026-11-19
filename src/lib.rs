@@ -43,6 +43,7 @@ use core::num::NonZeroU16;
 
 use moonblokz_chain_types::{
     ChainConfigBlockPayloadView, ConfigValueView, HEADER_SIZE, MAX_PAYLOAD_SIZE,
+    approval_fixed_size,
 };
 use moonblokz_crypto::MAX_AGGREGATED_SIGNATURES;
 use moonblokz_vm::{Fuel, HOST_READ_CHAIN_INFO, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
@@ -1569,7 +1570,8 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
     let mut horizon = None;
     // Bit `i` is set when the content declares `CALLER_LIMITED_IDS[i]`.
     let mut caller_limited_declared = 0u8;
-    let mut required_support_declared = false;
+    let mut required_support = None;
+    let mut block_size_limit = None;
 
     for entry in view.iter() {
         if entry.is_bytecode() {
@@ -1593,7 +1595,8 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
             parameter::TX_FEE_PER_BYTE_MAX => tx_fee_max = Some(declared),
             parameter::ACTIVE_CHAIN_LENGTH => window = Some(declared),
             parameter::VERIFICATION_HORIZON => horizon = Some(declared),
-            parameter::REQUIRED_SUPPORT => required_support_declared = true,
+            parameter::REQUIRED_SUPPORT => required_support = Some(declared),
+            parameter::BLOCK_SIZE_LIMIT => block_size_limit = Some(declared),
             _ => {}
         }
     }
@@ -1615,7 +1618,7 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
     // aggregate 40 signatures refuses the chain (DEC-173). It is a runtime check,
     // not a compile-time assertion, because such a build must still accept a
     // chain that declares a value it can honour.
-    if !required_support_declared {
+    if required_support.is_none() {
         check_bound(
             parameter::REQUIRED_SUPPORT,
             spec(parameter::REQUIRED_SUPPORT).fallback,
@@ -1631,12 +1634,21 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
         None => spec(id).fallback,
     };
 
-    // §6 checks 15 and 16. Both parameters are literal-only, so these values are
-    // exactly the ones the chain resolves and the checks are total.
+    // §6 checks 15, 16 and 21. Both parameters are literal-only, so these values
+    // are exactly the ones the chain resolves and the checks are total.
     check_window_horizon(
         declared_or_default(window, parameter::ACTIVE_CHAIN_LENGTH),
         declared_or_default(horizon, parameter::VERIFICATION_HORIZON),
         limits,
+    )?;
+
+    // §6 check 20 (DEC-257). Both parameters are literal-only. `required_support`
+    // passed check 2 (`≥ 1`) and check 3 (`≤ MAX_AGGREGATED_SIGNATURES`) in pass
+    // 2 above, declared or by its default, so `2·r − 1` cannot underflow here:
+    // keep this check after pass 2.
+    check_evidence_room(
+        declared_or_default(block_size_limit, parameter::BLOCK_SIZE_LIMIT),
+        declared_or_default(required_support, parameter::REQUIRED_SUPPORT),
     )?;
 
     // The fee range is a founder-facing diagnostic, not a guarantee: `config-encoder` runs
@@ -1795,23 +1807,49 @@ fn check_build_limit(id: u8, declared: u64, limits: BuildLimits) -> Result<(), C
     }
 }
 
-/// §6 checks 15 and 16, on the resolved window `w` and horizon `h`.
+/// §6 checks 15, 16 and 21, on the resolved window `w` and horizon `h`.
 ///
 /// - **15, `h < w`:** at `h = w`, FR58's switch bound would admit a common
 ///   ancestor one block below the window, which the in-place walk cannot take.
 /// - **16, `w + 2·h ≤ max_blocks`:** the window, the horizon and one competing
 ///   branch of depth `h` must fit the caller's block storage.
+/// - **21, `h ≥ 3` and `w mod h == 0` (D8, DEC-265):** the clean-slot rule
+///   (every block at `s ≡ h − 1 (mod h)` is clean) needs the block a slot drops,
+///   `s − w`, to be a slot itself, and genesis off the slots: block #1 is the
+///   chain-config block (FR54), never clean, and at `h = 2` it would be a slot
+///   (at `h = 1` every position would). Check 14 (`h ≥ 1`) has already run, so
+///   the modulus is never by zero.
 ///
 /// Acceptance-only, like [`check_build_limit`]: check 16 measures the caller's
 /// build, and the resolution guard has no `BuildLimits` to reach it with. Both
 /// parameters are literal-only, so the values here are the ones the chain
-/// resolves. A violation names the horizon, the parameter both checks constrain.
+/// resolves. A violation names the horizon, the parameter all three constrain.
 fn check_window_horizon(w: u64, h: u64, limits: BuildLimits) -> Result<(), ChainConfigError> {
-    if h < w && w + 2 * h <= limits.max_blocks as u64 {
+    if h < w && h >= 3 && w.is_multiple_of(h) && w + 2 * h <= limits.max_blocks as u64 {
         Ok(())
     } else {
         Err(ChainConfigError::BoundViolation(
             parameter::VERIFICATION_HORIZON,
+        ))
+    }
+}
+
+/// §6 check 20 (DEC-257) on the resolved `block_size_limit` and
+/// `required_support` `r`: the approval evidence's fixed part for a full
+/// subgroup (`m = 2·r − 1`, `r` signers) with no late entry must fit a block,
+/// or a deviation on this chain could never be approved. `HEADER_SIZE` and the
+/// aggregate size are the build's scheme's, the same on every node by check 19.
+///
+/// Acceptance-only: it spans two literal-only parameters, like check 16. The
+/// caller guarantees `1 ≤ r ≤ MAX_AGGREGATED_SIGNATURES` (checks 2 and 3). A
+/// violation names the block size limit, the parameter too small for the evidence.
+fn check_evidence_room(block_size_limit: u64, r: u64) -> Result<(), ChainConfigError> {
+    let r = r as usize;
+    if block_size_limit >= (HEADER_SIZE + approval_fixed_size(2 * r - 1, r)) as u64 {
+        Ok(())
+    } else {
+        Err(ChainConfigError::BoundViolation(
+            parameter::BLOCK_SIZE_LIMIT,
         ))
     }
 }
