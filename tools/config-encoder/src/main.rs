@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! config-encoder [INPUT.cfg] --key KEY.hex [-o OUTPUT.bin]
+//!                [--content CONTENT.bin] [--public-key NODE_ZERO.pk]
 //! ```
 //!
 //! Reads the override description from `INPUT.cfg`, or from standard input when
@@ -9,12 +10,17 @@
 //! Writes raw payload bytes to `OUTPUT.bin` when `-o` is given, and otherwise
 //! prints a hexdump — the form the content appears in when it is reviewed before
 //! a chain is founded.
+//!
+//! For a node firmware build (Story 12.1, DEC-291 / DEC-292), `--content`
+//! writes the same content without its trailing node-#0 signature (genesis
+//! signs it itself) and `--public-key` writes node #0's public key: the files
+//! `MOONBLOKZ_GENESIS_CHAIN_CONFIG` and `MOONBLOKZ_NODE_ZERO_PUBLIC_KEY` name.
 
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
 use moonblokz_config_encoder::encode;
-use moonblokz_crypto::PRIVATE_KEY_SIZE;
+use moonblokz_crypto::{Crypto, CryptoTrait, PRIVATE_KEY_SIZE, PublicKeyTrait, SIGNATURE_SIZE};
 
 fn main() -> ExitCode {
     match run() {
@@ -30,6 +36,8 @@ fn run() -> Result<(), String> {
     let mut input: Option<String> = None;
     let mut output: Option<String> = None;
     let mut key_path: Option<String> = None;
+    let mut content_path: Option<String> = None;
+    let mut public_key_path: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -40,8 +48,17 @@ fn run() -> Result<(), String> {
             "-k" | "--key" => {
                 key_path = Some(args.next().ok_or("--key needs a path")?);
             }
+            "--content" => {
+                content_path = Some(args.next().ok_or("--content needs a path")?);
+            }
+            "--public-key" => {
+                public_key_path = Some(args.next().ok_or("--public-key needs a path")?);
+            }
             "-h" | "--help" => {
-                println!("usage: config-encoder [INPUT.cfg] --key KEY.hex [-o OUTPUT.bin]");
+                println!(
+                    "usage: config-encoder [INPUT.cfg] --key KEY.hex [-o OUTPUT.bin] \
+                     [--content CONTENT.bin] [--public-key NODE_ZERO.pk]"
+                );
                 return Ok(());
             }
             other if other.starts_with('-') => return Err(format!("unknown option `{other}`")),
@@ -83,6 +100,18 @@ fn run() -> Result<(), String> {
             let mut stdout = std::io::stdout();
             writeln!(stdout, "{}", hex.join(" ")).map_err(|e| e.to_string())?;
         }
+    }
+
+    if let Some(path) = content_path {
+        // `encode` appends exactly one signature to the content.
+        let content = &payload[..payload.len() - SIGNATURE_SIZE];
+        std::fs::write(&path, content).map_err(|e| format!("cannot write {path}: {e}"))?;
+    }
+    if let Some(path) = public_key_path {
+        let crypto =
+            Crypto::new(private_key).map_err(|_| "the key is not valid for this scheme")?;
+        std::fs::write(&path, crypto.public_key().serialize())
+            .map_err(|e| format!("cannot write {path}: {e}"))?;
     }
 
     eprintln!("config-encoder: {} bytes", payload.len());
