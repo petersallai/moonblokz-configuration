@@ -56,7 +56,7 @@ use moonblokz_vm_asm::assemble;
 /// identifier in the error — which is the same answer it would give to any chain
 /// it cannot honour.
 const REFERENCE_BUILD_LIMITS: BuildLimits = BuildLimits {
-    utxo_unspent_bits: 256,
+    utxo_unspent_bits: 32,
     snake_chain_length_max: 500,
     max_blocks: 600,
     block_size_max: 2016,
