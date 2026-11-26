@@ -153,7 +153,7 @@ pub struct BuildLimits {
 /// use moonblokz_configuration::{BuildLimits, limits_are_expressible};
 ///
 /// const LIMITS: BuildLimits = BuildLimits {
-///     utxo_unspent_bits: 256,
+///     utxo_unspent_bits: 32,
 ///     snake_chain_length_max: 500,
 ///     max_blocks: 600,
 ///     block_size_max: 2016,
@@ -493,7 +493,7 @@ const REGISTRY: [ParameterSpec; 33] = [
     spec_of(parameter::INTER_BLOCK_INTERVAL_MS, 4, true, 60_000),
     spec_of(parameter::GRACE_PERIOD_WINDOW_MS, 4, true, 30_000),
     spec_of(parameter::BLOCK_SIZE_LIMIT, 4, false, 2016),
-    spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 2, false, 255),
+    spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 2, false, 32),
     spec_of(parameter::MINING_REWARD, 4, true, 0),
     spec_of(parameter::VOTE_SCALE, 2, true, 1000),
     spec_of(parameter::VOTE_INTEREST, 1, true, 5),

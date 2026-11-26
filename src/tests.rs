@@ -168,7 +168,7 @@ fn empty_override_set_resolves_every_default() {
     assert_eq!(config.inter_block_interval_ms(), 60_000);
     assert_eq!(config.grace_period_window_ms(), 30_000);
     assert_eq!(config.block_size_limit(), 2016);
-    assert_eq!(config.max_utxo_outputs(), 255);
+    assert_eq!(config.max_utxo_outputs(), 32);
     assert_eq!(config.vote_scale().get(), 1000);
     assert_eq!(config.vote_interest(), 5);
     assert_eq!(config.parent_recovery_per_head_retry_interval_ms(), 120_000);
@@ -1008,7 +1008,7 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
     ));
     // A capacity exactly at a default holds it.
     let at_defaults = BuildLimits {
-        utxo_unspent_bits: 255,
+        utxo_unspent_bits: 32,
         snake_chain_length_max: 500,
         max_blocks: 600,
         block_size_max: 2016,
@@ -1018,7 +1018,7 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
     assert!(super::accept_content(empty.as_slice(), at_defaults).is_ok());
 
     let narrow_cache = BuildLimits {
-        utxo_unspent_bits: 254,
+        utxo_unspent_bits: 31,
         ..TEST_LIMITS
     };
     assert!(matches!(
@@ -1032,12 +1032,12 @@ fn an_absent_capacity_parameter_is_measured_by_its_default() {
     // default it replaces is then not measured at all.
     let fits_both = frame(&[
         Entry::Literal(parameter::ACTIVE_CHAIN_LENGTH, &450u32.to_le_bytes()),
-        Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &254u16.to_le_bytes()),
+        Entry::Literal(parameter::MAX_BLOCK_UTXO_OUTPUT, &31u16.to_le_bytes()),
     ]);
     // `W = 450` (a multiple of the default `H = 50`, check 21) needs
     // `450 + 2·50` blocks of storage.
     let small_build = BuildLimits {
-        utxo_unspent_bits: 254,
+        utxo_unspent_bits: 31,
         snake_chain_length_max: 499,
         max_blocks: 599,
         block_size_max: 2016,
