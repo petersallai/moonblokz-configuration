@@ -170,7 +170,9 @@ fn empty_override_set_resolves_every_default() {
     assert_eq!(config.block_size_limit(), 2016);
     assert_eq!(config.max_utxo_outputs(), 32);
     assert_eq!(config.vote_scale().get(), 1000);
-    assert_eq!(config.vote_interest(), 5);
+    // 5 → 50 by DEC-176, → 100 by DEC-343 (the protection threshold at about
+    // 50 nodes), the specification's value.
+    assert_eq!(config.vote_interest(), 100);
     assert_eq!(config.parent_recovery_per_head_retry_interval_ms(), 120_000);
     assert_eq!(config.parent_recovery_min_emit_interval_ms(), 10_000);
     assert_eq!(config.required_support(), 40);
@@ -1577,13 +1579,71 @@ fn a_computed_vote_scale_may_not_be_zero() {
 
 #[test]
 fn mining_reward_accepts_a_literal_and_a_program() {
-    // ID 5 is `mining_reward` (DEC-109): a `u32` that may be computed. Story 6.4
-    // registers the row; its accessor and FR6's `mined_amount` rule are Story 7.2's.
+    // ID 5 is `mining_reward` (DEC-109): a `u32` that may be computed, because
+    // the blockchain only checks the header's `mined_amount` against it (DEC-340).
     let literal = frame(&[Entry::Literal(parameter::MINING_REWARD, &[100, 0, 0, 0])]);
     assert!(accept_content(literal.as_slice()).is_ok());
     let program = push_u8_program(7);
     let computed = frame(&[Entry::Bytecode(parameter::MINING_REWARD, &program)]);
     assert!(accept_content(computed.as_slice()).is_ok());
+}
+
+#[test]
+fn mining_reward_resolves_its_default_a_literal_and_a_program() {
+    // Story 7.2: the accessor the FR6 `mined_amount` check reads.
+    let module = loaded(&[]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .mining_reward(),
+        0
+    );
+    let module = loaded(&[Entry::Literal(parameter::MINING_REWARD, &[100, 0, 0, 0])]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .mining_reward(),
+        100
+    );
+    let program = push_u8_program(7);
+    let module = loaded(&[Entry::Bytecode(parameter::MINING_REWARD, &program)]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .mining_reward(),
+        7
+    );
+}
+
+#[test]
+fn replay_block_reward_is_literal_only() {
+    // DEC-341: the per-block step credits it as an amount, which a declined
+    // chain-info read could not skip, so a program is refused at acceptance.
+    let program = push_u8_program(7);
+    let computed = frame(&[Entry::Bytecode(parameter::REPLAY_BLOCK_REWARD, &program)]);
+    assert!(matches!(
+        accept_content(computed.as_slice()),
+        Err(ChainConfigError::BytecodeNotPermitted(id)) if id == parameter::REPLAY_BLOCK_REWARD
+    ));
+    let literal = frame(&[Entry::Literal(
+        parameter::REPLAY_BLOCK_REWARD,
+        &250u64.to_le_bytes(),
+    )]);
+    assert!(accept_content(literal.as_slice()).is_ok());
+    let module = loaded(&[Entry::Literal(
+        parameter::REPLAY_BLOCK_REWARD,
+        &250u64.to_le_bytes(),
+    )]);
+    assert_eq!(
+        module
+            .active_configuration()
+            .expect("handle")
+            .replay_block_reward(),
+        250
+    );
 }
 
 #[test]
@@ -1603,9 +1663,9 @@ fn a_program_that_traps_is_accepted_and_falls_back_at_resolution() {
         &UNDEFINED_OPCODE_PROGRAM,
     )]);
     let config = module.active_configuration().expect("handle");
-    assert_eq!(config.vote_interest(), 5);
+    assert_eq!(config.vote_interest(), 100);
     // Stable across calls: the failure is a property of the program, not of state.
-    assert_eq!(config.vote_interest(), 5);
+    assert_eq!(config.vote_interest(), 100);
 }
 
 #[test]
@@ -1619,7 +1679,7 @@ fn a_program_that_runs_out_of_fuel_is_accepted_and_falls_back() {
             .active_configuration()
             .expect("handle")
             .vote_interest(),
-        5
+        100
     );
 }
 

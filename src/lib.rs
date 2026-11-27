@@ -282,7 +282,8 @@ pub mod parameter {
     /// FR36 (a) mining reward: FR6 requires a block's `mined_amount` header
     /// field to equal it. Reassigned from `max_aggregated_signatures` before any
     /// chain existed (DEC-109); registered by Story 6.4 so the registry stays
-    /// dense, its accessor and FR6 check arrive with Story 7.2.
+    /// dense (DEC-217). The blockchain checks the header against it and credits
+    /// the header's value, so it may be computed (a check, DEC-340).
     pub const MINING_REWARD: u8 = 5;
     /// FR37 per-credit vote value; also the anti-capture interest denominator.
     pub const VOTE_SCALE: u8 = 6;
@@ -338,7 +339,8 @@ pub mod parameter {
     pub const TX_FEE_PER_BYTE_MAX: u8 = 26;
     /// FR29 deviation-replay insertion delay, milliseconds.
     pub const DEVIATION_REPLAY_INSERTION_DELAY_MS: u8 = 27;
-    /// FR36 (c) replay-block reward.
+    /// FR36 (c) replay-block reward. Literal-only: the per-block step credits it
+    /// as an amount (DEC-341, [`APPLIED_AMOUNT_IDS`]).
     pub const REPLAY_BLOCK_REWARD: u8 = 28;
 
     /// Fuel budget of one program evaluation. Literal-only by rule.
@@ -496,7 +498,7 @@ const REGISTRY: [ParameterSpec; 33] = [
     spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 2, false, 32),
     spec_of(parameter::MINING_REWARD, 4, true, 0),
     spec_of(parameter::VOTE_SCALE, 2, true, 1000),
-    spec_of(parameter::VOTE_INTEREST, 1, true, 5),
+    spec_of(parameter::VOTE_INTEREST, 1, true, 100),
     spec_of(
         parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS,
         4,
@@ -546,7 +548,7 @@ const REGISTRY: [ParameterSpec; 33] = [
         true,
         300_000,
     ),
-    spec_of(parameter::REPLAY_BLOCK_REWARD, 8, true, 100),
+    spec_of(parameter::REPLAY_BLOCK_REWARD, 8, false, 100),
     spec_of(parameter::VM_FUEL_LIMIT, 4, false, 20_000),
     spec_of(parameter::VERIFICATION_HORIZON, 4, false, 50),
     spec_of(parameter::GRACE_PERIOD_STEP_MS, 4, true, 900_000),
@@ -607,6 +609,28 @@ const _: () = {
                 panic!("a per-build-limited parameter needs a literal default")
             }
         }
+        index += 1;
+    }
+};
+
+/// The identifiers the blockchain's per-block step applies to state as an
+/// **amount** (a credit, a debit, a mint) rather than checking against a value
+/// the block carries.
+///
+/// These must stay literal-only, and the assertion below enforces it
+/// (DEC-340, DEC-341). A consensus parameter consumed inside the step is
+/// resolved under a chain-info source that declines at every position of a
+/// window-anchored FR3 pass; a check whose resolution read a declined value is
+/// skipped, but an amount cannot be skipped, and crediting the fall-through
+/// would leave a joining node with a different balance than the network. A
+/// program that reads no chain-info is a function of content-fixed parameters
+/// only — a constant a literal states equally — so the form loses nothing.
+const APPLIED_AMOUNT_IDS: [u8; 1] = [parameter::REPLAY_BLOCK_REWARD];
+
+const _: () = {
+    let mut index = 0;
+    while index < APPLIED_AMOUNT_IDS.len() {
+        assert!(!REGISTRY[APPLIED_AMOUNT_IDS[index] as usize - 1].bytecode_allowed);
         index += 1;
     }
 };
@@ -1119,6 +1143,12 @@ impl<'a> ActiveConfig<'a> {
         narrow_u16(self.resolve(parameter::MAX_BLOCK_UTXO_OUTPUT))
     }
 
+    /// FR36 (a) / FR6 mining reward: a non-genesis block's `mined_amount`
+    /// header field must equal it at the block's pre-state.
+    pub fn mining_reward(&self) -> u32 {
+        narrow_u32(self.resolve(parameter::MINING_REWARD))
+    }
+
     /// FR37 `vote_scale` — the per-credit vote value, and the anti-capture
     /// interest denominator, which is why zero is refused at acceptance.
     pub fn vote_scale(&self) -> NonZeroU16 {
@@ -1235,7 +1265,7 @@ impl<'a> ActiveConfig<'a> {
         narrow_u32(self.resolve(parameter::DEVIATION_REPLAY_INSERTION_DELAY_MS))
     }
 
-    /// FR36 (c) replay-block reward.
+    /// FR36 (c) replay-block reward; literal-only (DEC-341).
     pub fn replay_block_reward(&self) -> u64 {
         self.resolve(parameter::REPLAY_BLOCK_REWARD)
     }
