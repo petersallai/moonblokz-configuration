@@ -701,6 +701,15 @@ mod tests {
     }
 
     #[test]
+    fn a_program_for_the_replay_block_reward_is_refused() {
+        // DEC-341: an amount the per-block step credits is literal-only.
+        let error = encode("replay_block_reward = {\n    PUSH 3\n    RET\n}\n", KEY)
+            .expect_err("literal-only");
+        assert_eq!(error.line, 1);
+        assert!(error.message.contains("literal-only"));
+    }
+
+    #[test]
     fn a_program_may_read_chain_info() {
         let module = loaded(
             "parent_recovery_min_emit_interval_ms = {\n    GETCHAININFO 1, 0\n    PUSH 1000\n    MUL\n    RET\n}\n",
