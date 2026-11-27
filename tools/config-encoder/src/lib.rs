@@ -372,17 +372,22 @@ pub fn founder_report(
             name: "vote_interest",
         });
     }
+    // Each literal is judged on its own; only the ratio and `N*` need both.
+    if let Some(vs) = scale
+        && vs > 5100
+    {
+        warnings.push(FounderWarning::VoteScaleAbove5100 { vote_scale: vs });
+    }
+    if interest == Some(0) {
+        warnings.push(FounderWarning::InterestZero);
+    }
     let (Some(vs), Some(vi)) = (scale, interest) else {
         return Ok(FounderReport {
             n_star: None,
             warnings,
         });
     };
-    if vs > 5100 {
-        warnings.push(FounderWarning::VoteScaleAbove5100 { vote_scale: vs });
-    }
     if vi == 0 {
-        warnings.push(FounderWarning::InterestZero);
         return Ok(FounderReport {
             n_star: None,
             warnings,
@@ -918,6 +923,23 @@ mod tests {
             [FounderWarning::NotEvaluated {
                 name: "vote_interest"
             }]
+        );
+    }
+
+    #[test]
+    fn a_literal_is_judged_even_when_the_other_parameter_is_a_program() {
+        let report = founder_report(
+            "vote_scale = {\n    PUSH_U16 1000\n    RET\n}\nvote_interest = 0\n",
+            None,
+        )
+        .expect("parses");
+        assert_eq!(report.n_star, None);
+        assert_eq!(
+            report.warnings,
+            [
+                FounderWarning::NotEvaluated { name: "vote_scale" },
+                FounderWarning::InterestZero
+            ]
         );
     }
 
