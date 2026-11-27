@@ -6,7 +6,9 @@
 
 use core::cell::{Cell, RefCell};
 
-use moonblokz_chain_types::{CONFIG_KEY_BYTECODE_FLAG, ChainConfigPayloadBuilder, MAX_BLOCK_SIZE};
+use moonblokz_chain_types::{
+    APPROVAL_LATE_ENTRY_SIZE, CONFIG_KEY_BYTECODE_FLAG, ChainConfigPayloadBuilder, MAX_BLOCK_SIZE,
+};
 use moonblokz_crypto::{Crypto, CryptoTrait, PRIVATE_KEY_SIZE, SIGNATURE_SIZE};
 use moonblokz_vm::opcode as op;
 
@@ -1273,9 +1275,11 @@ fn the_horizon_divides_the_window_and_is_at_least_three() {
 }
 
 #[test]
-fn the_block_size_limit_holds_an_evidence_fixed_part() {
-    // §6 check 20 (DEC-257): `block_size_limit ≥ HEADER_SIZE +
-    // approval_fixed_size(2·r − 1, r)`, measured on declared-or-default values.
+fn the_block_size_limit_holds_an_evidence_fixed_part_and_one_late_entry() {
+    // §6 check 20 (DEC-257, DEC-345): `block_size_limit ≥ HEADER_SIZE +
+    // approval_fixed_size(2·r − 1, r) + APPROVAL_LATE_ENTRY_SIZE` — the fixed
+    // part and room for the late list's first entry, the originally-top node
+    // (DEC-344) — measured on declared-or-default values.
     let refused = |payload: &[u8]| {
         matches!(
             accept_content(payload),
@@ -1284,7 +1288,9 @@ fn the_block_size_limit_holds_an_evidence_fixed_part() {
             ))
         )
     };
-    let need = |r: usize| (HEADER_SIZE + approval_fixed_size(2 * r - 1, r)) as u32;
+    let need = |r: usize| {
+        (HEADER_SIZE + approval_fixed_size(2 * r - 1, r) + APPROVAL_LATE_ENTRY_SIZE) as u32
+    };
     let content = |limit: Option<u32>, r: Option<u8>| {
         let limit = limit.map(u32::to_le_bytes);
         let r = r.map(|r| [r]);

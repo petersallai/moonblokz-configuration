@@ -42,8 +42,8 @@ that runs in the blockchain, over the envelope
 use core::num::NonZeroU16;
 
 use moonblokz_chain_types::{
-    ChainConfigBlockPayloadView, ConfigValueView, HEADER_SIZE, MAX_PAYLOAD_SIZE,
-    approval_fixed_size,
+    APPROVAL_LATE_ENTRY_SIZE, ChainConfigBlockPayloadView, ConfigValueView, HEADER_SIZE,
+    MAX_PAYLOAD_SIZE, approval_fixed_size,
 };
 use moonblokz_crypto::MAX_AGGREGATED_SIGNATURES;
 use moonblokz_vm::{Fuel, HOST_READ_CHAIN_INFO, HOST_RESOLVE_CONFIG, Vm, VmHost, VmOutcome};
@@ -1672,7 +1672,7 @@ pub fn accept_content(payload: &[u8], limits: BuildLimits) -> Result<usize, Chai
         limits,
     )?;
 
-    // §6 check 20 (DEC-257). Both parameters are literal-only. `required_support`
+    // §6 check 20 (DEC-257, DEC-345). Both parameters are literal-only. `required_support`
     // passed check 2 (`≥ 1`) and check 3 (`≤ MAX_AGGREGATED_SIGNATURES`) in pass
     // 2 above, declared or by its default, so `2·r − 1` cannot underflow here:
     // keep this check after pass 2.
@@ -1864,18 +1864,24 @@ fn check_window_horizon(w: u64, h: u64, limits: BuildLimits) -> Result<(), Chain
     }
 }
 
-/// §6 check 20 (DEC-257) on the resolved `block_size_limit` and
+/// §6 check 20 (DEC-257, DEC-345) on the resolved `block_size_limit` and
 /// `required_support` `r`: the approval evidence's fixed part for a full
-/// subgroup (`m = 2·r − 1`, `r` signers) with no late entry must fit a block,
-/// or a deviation on this chain could never be approved. `HEADER_SIZE` and the
-/// aggregate size are the build's scheme's, the same on every node by check 19.
+/// subgroup (`m = 2·r − 1`, `r` signers) and one late-node entry must fit a
+/// block. Without the fixed part a deviation on this chain could never be
+/// approved; without the entry the originally-top node, the late list's first
+/// entry (DEC-344), would go unpenalised. An evidence carries exactly `r_eff ≤
+/// r` signers over `m ≤ 2·r − 1` members (DEC-347) and its fixed part grows
+/// with both, so every evidence has that room. `HEADER_SIZE` and the aggregate
+/// size are the build's scheme's, the same on every node by check 19.
 ///
 /// Acceptance-only: it spans two literal-only parameters, like check 16. The
 /// caller guarantees `1 ≤ r ≤ MAX_AGGREGATED_SIGNATURES` (checks 2 and 3). A
 /// violation names the block size limit, the parameter too small for the evidence.
 fn check_evidence_room(block_size_limit: u64, r: u64) -> Result<(), ChainConfigError> {
     let r = r as usize;
-    if block_size_limit >= (HEADER_SIZE + approval_fixed_size(2 * r - 1, r)) as u64 {
+    if block_size_limit
+        >= (HEADER_SIZE + approval_fixed_size(2 * r - 1, r) + APPROVAL_LATE_ENTRY_SIZE) as u64
+    {
         Ok(())
     } else {
         Err(ChainConfigError::BoundViolation(
