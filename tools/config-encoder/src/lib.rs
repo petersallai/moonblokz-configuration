@@ -863,9 +863,9 @@ mod tests {
     // --- DEC-179: founder warnings -----------------------------------------
 
     #[test]
-    fn the_defaults_report_n_star_100_and_no_warning() {
+    fn the_defaults_report_n_star_50_and_no_warning() {
         let report = founder_report("", None).expect("parses");
-        assert_eq!(report.n_star, Some(100), "5 · 1000 / 50");
+        assert_eq!(report.n_star, Some(50), "5 · 1000 / 100 (DEC-343)");
         assert!(report.warnings.is_empty());
     }
 
@@ -901,15 +901,15 @@ mod tests {
 
     #[test]
     fn the_expected_network_size_is_measured_against_n_star() {
-        let below = founder_report("", Some(99)).expect("parses");
+        let below = founder_report("", Some(49)).expect("parses");
         assert_eq!(
             below.warnings,
             [FounderWarning::NetworkBelowNStar {
-                network_size: 99,
-                n_star: 100
+                network_size: 49,
+                n_star: 50
             }]
         );
-        let at = founder_report("", Some(100)).expect("parses");
+        let at = founder_report("", Some(50)).expect("parses");
         assert!(at.warnings.is_empty(), "at N* the interest protects");
     }
 

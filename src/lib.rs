@@ -498,7 +498,7 @@ const REGISTRY: [ParameterSpec; 33] = [
     spec_of(parameter::MAX_BLOCK_UTXO_OUTPUT, 2, false, 32),
     spec_of(parameter::MINING_REWARD, 4, true, 0),
     spec_of(parameter::VOTE_SCALE, 2, true, 1000),
-    spec_of(parameter::VOTE_INTEREST, 1, true, 50),
+    spec_of(parameter::VOTE_INTEREST, 1, true, 100),
     spec_of(
         parameter::PARENT_RECOVERY_PER_HEAD_RETRY_INTERVAL_MS,
         4,

@@ -170,8 +170,9 @@ fn empty_override_set_resolves_every_default() {
     assert_eq!(config.block_size_limit(), 2016);
     assert_eq!(config.max_utxo_outputs(), 32);
     assert_eq!(config.vote_scale().get(), 1000);
-    // Raised from 5 by DEC-176 (Story 7.2), the specification's value.
-    assert_eq!(config.vote_interest(), 50);
+    // 5 → 50 by DEC-176, → 100 by DEC-343 (the protection threshold at about
+    // 50 nodes), the specification's value.
+    assert_eq!(config.vote_interest(), 100);
     assert_eq!(config.parent_recovery_per_head_retry_interval_ms(), 120_000);
     assert_eq!(config.parent_recovery_min_emit_interval_ms(), 10_000);
     assert_eq!(config.required_support(), 40);
@@ -1662,9 +1663,9 @@ fn a_program_that_traps_is_accepted_and_falls_back_at_resolution() {
         &UNDEFINED_OPCODE_PROGRAM,
     )]);
     let config = module.active_configuration().expect("handle");
-    assert_eq!(config.vote_interest(), 50);
+    assert_eq!(config.vote_interest(), 100);
     // Stable across calls: the failure is a property of the program, not of state.
-    assert_eq!(config.vote_interest(), 50);
+    assert_eq!(config.vote_interest(), 100);
 }
 
 #[test]
@@ -1678,7 +1679,7 @@ fn a_program_that_runs_out_of_fuel_is_accepted_and_falls_back() {
             .active_configuration()
             .expect("handle")
             .vote_interest(),
-        50
+        100
     );
 }
 
