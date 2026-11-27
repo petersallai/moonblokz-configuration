@@ -3,6 +3,7 @@
 //! ```text
 //! config-encoder [INPUT.cfg] --key KEY.hex [-o OUTPUT.bin]
 //!                [--content CONTENT.bin] [--public-key NODE_ZERO.pk]
+//!                [--network-size N]
 //! ```
 //!
 //! Reads the override description from `INPUT.cfg`, or from standard input when
@@ -15,11 +16,15 @@
 //! writes the same content without its trailing node-#0 signature (genesis
 //! signs it itself) and `--public-key` writes node #0's public key: the files
 //! `MOONBLOKZ_GENESIS_CHAIN_CONFIG` and `MOONBLOKZ_NODE_ZERO_PUBLIC_KEY` name.
+//!
+//! After encoding it prints the founder diagnostics of DEC-179 to standard
+//! error — `N*` and any warnings, measured against `--network-size` when given
+//! — which change neither the verdict nor the bytes.
 
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
-use moonblokz_config_encoder::encode;
+use moonblokz_config_encoder::{encode, founder_report};
 use moonblokz_crypto::{Crypto, CryptoTrait, PRIVATE_KEY_SIZE, PublicKeyTrait, SIGNATURE_SIZE};
 
 fn main() -> ExitCode {
@@ -38,6 +43,7 @@ fn run() -> Result<(), String> {
     let mut key_path: Option<String> = None;
     let mut content_path: Option<String> = None;
     let mut public_key_path: Option<String> = None;
+    let mut network_size: Option<u64> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -54,10 +60,18 @@ fn run() -> Result<(), String> {
             "--public-key" => {
                 public_key_path = Some(args.next().ok_or("--public-key needs a path")?);
             }
+            "--network-size" => {
+                let value = args.next().ok_or("--network-size needs a number")?;
+                network_size = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--network-size: `{value}` is not a number"))?,
+                );
+            }
             "-h" | "--help" => {
                 println!(
                     "usage: config-encoder [INPUT.cfg] --key KEY.hex [-o OUTPUT.bin] \
-                     [--content CONTENT.bin] [--public-key NODE_ZERO.pk]"
+                     [--content CONTENT.bin] [--public-key NODE_ZERO.pk] [--network-size N]"
                 );
                 return Ok(());
             }
@@ -115,6 +129,15 @@ fn run() -> Result<(), String> {
     }
 
     eprintln!("config-encoder: {} bytes", payload.len());
+    // DEC-179: founder diagnostics, which never change the verdict or the bytes.
+    if let Ok(report) = founder_report(&source, network_size) {
+        if let Some(n_star) = report.n_star {
+            eprintln!("config-encoder: N* = {n_star}");
+        }
+        for warning in &report.warnings {
+            eprintln!("config-encoder: warning: {warning}");
+        }
+    }
     Ok(())
 }
 

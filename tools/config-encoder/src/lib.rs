@@ -254,6 +254,161 @@ pub fn encode(source: &str, private_key: [u8; PRIVATE_KEY_SIZE]) -> Result<Vec<u
     Ok(payload)
 }
 
+/// A warning from [`founder_report`]: advice to a chain's founder that never
+/// changes the encoder's verdict or its output (DEC-179).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FounderWarning {
+    /// `vote_interest / vote_scale` is below 5 %: the anti-capture interest
+    /// protects only networks above `N*`.
+    InterestBelowFivePercent {
+        /// The declared or default `vote_interest`.
+        vote_interest: u64,
+        /// The declared or default `vote_scale`.
+        vote_scale: u64,
+    },
+    /// `vote_scale > 5100`: even `vote_interest = 255` leaves `N* > 100`.
+    VoteScaleAbove5100 {
+        /// The declared `vote_scale`.
+        vote_scale: u64,
+    },
+    /// `vote_interest = 0`: no anti-capture interest and no DEC-178 liveness
+    /// credit.
+    InterestZero,
+    /// The expected network size given with `--network-size` is below `N*`.
+    NetworkBelowNStar {
+        /// The expected network size.
+        network_size: u64,
+        /// `⌈5 · vote_scale / vote_interest⌉`.
+        n_star: u64,
+    },
+    /// A parameter the report reads is a program, so it was not evaluated.
+    NotEvaluated {
+        /// The parameter's registry name.
+        name: &'static str,
+    },
+}
+
+impl fmt::Display for FounderWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InterestBelowFivePercent {
+                vote_interest,
+                vote_scale,
+            } => write!(
+                f,
+                "vote_interest / vote_scale = {vote_interest} / {vote_scale} is below 5 %: \
+                 the anti-capture interest protects only large networks"
+            ),
+            Self::VoteScaleAbove5100 { vote_scale } => write!(
+                f,
+                "vote_scale = {vote_scale} is above 5100: even vote_interest = 255 leaves N* above 100"
+            ),
+            Self::InterestZero => write!(
+                f,
+                "vote_interest = 0: no anti-capture interest and no liveness credit"
+            ),
+            Self::NetworkBelowNStar {
+                network_size,
+                n_star,
+            } => write!(
+                f,
+                "the expected network size {network_size} is below N* = {n_star}: \
+                 a minority coalition's private branch is not stopped by the interest"
+            ),
+            Self::NotEvaluated { name } => {
+                write!(f, "{name} is a program and was not evaluated")
+            }
+        }
+    }
+}
+
+/// What [`founder_report`] finds in a configuration description.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FounderReport {
+    /// `N* = ⌈5 · vote_scale / vote_interest⌉`, the network size above which
+    /// the anti-capture interest stops a minority coalition's natural-fork
+    /// private branch; `None` when either value is a program or
+    /// `vote_interest = 0`.
+    pub n_star: Option<u64>,
+    /// The warnings, in a fixed order.
+    pub warnings: Vec<FounderWarning>,
+}
+
+/// DEC-179: the founder diagnostics for `source`, from its declared literals
+/// (code-baked defaults for absent parameters). It never changes the verdict
+/// of [`encode`], which a caller runs separately; `network_size` is the
+/// founder's expected network size, when given.
+pub fn founder_report(
+    source: &str,
+    network_size: Option<u64>,
+) -> Result<FounderReport, EncodeError> {
+    let overrides = parse(source)?;
+    // `Some(Some(v))` a literal, `Some(None)` a program, `None` absent.
+    let declared = |id: u8| {
+        overrides
+            .iter()
+            .find(|o| o.id == id)
+            .map(|o| match &o.value {
+                Value::Literal(bytes) => {
+                    let mut le = [0u8; 8];
+                    le[..bytes.len()].copy_from_slice(bytes);
+                    Some(u64::from_le_bytes(le))
+                }
+                Value::Program(_) => None,
+            })
+    };
+    let value_of = |id: u8| match declared(id) {
+        Some(value) => value,
+        None => parameter_spec(id).map(|spec| spec.fallback),
+    };
+    let mut warnings = Vec::new();
+    let scale = value_of(parameter::VOTE_SCALE);
+    let interest = value_of(parameter::VOTE_INTEREST);
+    if scale.is_none() {
+        warnings.push(FounderWarning::NotEvaluated { name: "vote_scale" });
+    }
+    if interest.is_none() {
+        warnings.push(FounderWarning::NotEvaluated {
+            name: "vote_interest",
+        });
+    }
+    let (Some(vs), Some(vi)) = (scale, interest) else {
+        return Ok(FounderReport {
+            n_star: None,
+            warnings,
+        });
+    };
+    if vs > 5100 {
+        warnings.push(FounderWarning::VoteScaleAbove5100 { vote_scale: vs });
+    }
+    if vi == 0 {
+        warnings.push(FounderWarning::InterestZero);
+        return Ok(FounderReport {
+            n_star: None,
+            warnings,
+        });
+    }
+    if vi * 20 < vs {
+        warnings.push(FounderWarning::InterestBelowFivePercent {
+            vote_interest: vi,
+            vote_scale: vs,
+        });
+    }
+    let n_star = (5 * vs).div_ceil(vi);
+    if let Some(size) = network_size
+        && size < n_star
+    {
+        warnings.push(FounderWarning::NetworkBelowNStar {
+            network_size: size,
+            n_star,
+        });
+    }
+    Ok(FounderReport {
+        n_star: Some(n_star),
+        warnings,
+    })
+}
+
 /// Parses the input into overrides, in file order.
 fn parse(source: &str) -> Result<Vec<Override>, EncodeError> {
     let lines: Vec<&str> = source.lines().collect();
@@ -698,6 +853,91 @@ mod tests {
             .expect_err("literal-only");
         assert_eq!(error.line, 1);
         assert!(error.message.contains("literal-only"));
+    }
+
+    // --- DEC-179: founder warnings -----------------------------------------
+
+    #[test]
+    fn the_defaults_report_n_star_100_and_no_warning() {
+        let report = founder_report("", None).expect("parses");
+        assert_eq!(report.n_star, Some(100), "5 · 1000 / 50");
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn each_founder_warning_fires_on_its_condition() {
+        let report = founder_report("vote_interest = 49\n", None).expect("parses");
+        assert_eq!(report.n_star, Some(103));
+        assert_eq!(
+            report.warnings,
+            [FounderWarning::InterestBelowFivePercent {
+                vote_interest: 49,
+                vote_scale: 1000
+            }]
+        );
+        let report =
+            founder_report("vote_scale = 5101\nvote_interest = 255\n", None).expect("parses");
+        assert_eq!(report.n_star, Some(101));
+        // 255 / 5101 is also just under 5 %, which is why 5100 is the limit.
+        assert_eq!(
+            report.warnings,
+            [
+                FounderWarning::VoteScaleAbove5100 { vote_scale: 5101 },
+                FounderWarning::InterestBelowFivePercent {
+                    vote_interest: 255,
+                    vote_scale: 5101
+                }
+            ]
+        );
+        let report = founder_report("vote_interest = 0\n", None).expect("parses");
+        assert_eq!(report.n_star, None);
+        assert_eq!(report.warnings, [FounderWarning::InterestZero]);
+    }
+
+    #[test]
+    fn the_expected_network_size_is_measured_against_n_star() {
+        let below = founder_report("", Some(99)).expect("parses");
+        assert_eq!(
+            below.warnings,
+            [FounderWarning::NetworkBelowNStar {
+                network_size: 99,
+                n_star: 100
+            }]
+        );
+        let at = founder_report("", Some(100)).expect("parses");
+        assert!(at.warnings.is_empty(), "at N* the interest protects");
+    }
+
+    #[test]
+    fn a_program_valued_vote_parameter_is_not_evaluated() {
+        let report = founder_report("vote_interest = {\n    PUSH_U8 9\n    RET\n}\n", Some(5))
+            .expect("parses");
+        assert_eq!(report.n_star, None);
+        assert_eq!(
+            report.warnings,
+            [FounderWarning::NotEvaluated {
+                name: "vote_interest"
+            }]
+        );
+    }
+
+    #[test]
+    fn warnings_change_neither_the_verdict_nor_the_bytes() {
+        let source = "vote_interest = 1\n";
+        assert!(
+            !founder_report(source, Some(3))
+                .expect("parses")
+                .warnings
+                .is_empty()
+        );
+        assert_eq!(
+            encode(source, KEY).expect("still encodes"),
+            encode(source, KEY).expect("deterministic")
+        );
+        assert!(
+            founder_report("no_such_parameter = 1\n", None).is_err(),
+            "parse errors surface"
+        );
     }
 
     #[test]
