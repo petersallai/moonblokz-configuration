@@ -540,7 +540,7 @@ const REGISTRY: [ParameterSpec; 33] = [
     ),
     spec_of(parameter::CUSTODIAN_FEE, 8, true, 1),
     spec_of(parameter::REGISTRATION_PRICE, 8, true, 100),
-    spec_of(parameter::TX_FEE_PER_BYTE_MIN, 8, true, 0),
+    spec_of(parameter::TX_FEE_PER_BYTE_MIN, 8, true, 1),
     spec_of(parameter::TX_FEE_PER_BYTE_MAX, 8, true, 1000),
     spec_of(
         parameter::DEVIATION_REPLAY_INSERTION_DELAY_MS,
@@ -1248,7 +1248,10 @@ impl<'a> ActiveConfig<'a> {
     /// is computed by a program the relation is unchecked. Ratified 2026-08-18: the
     /// consumer resolves an inconsistent range **at the point of use**, and must
     /// not assume `min <= max`. Note that whatever it does must be deterministic,
-    /// since both nodes read the same content and must reach the same fee.
+    /// since both nodes read the same content and must reach the same fee. The
+    /// blockchain's resolution (DEC-311): an inverted range admits no fee, so every
+    /// non-exempt transaction fails the FR56 predicate. Default 1 (DEC-181): a
+    /// transaction pays at least its own size.
     pub fn tx_fee_per_byte_min(&self) -> u64 {
         self.resolve(parameter::TX_FEE_PER_BYTE_MIN)
     }

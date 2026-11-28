@@ -183,7 +183,7 @@ fn empty_override_set_resolves_every_default() {
     assert_eq!(config.mempool_replenishment_interval_ms(), 500_000);
     assert_eq!(config.custodian_fee(), 1);
     assert_eq!(config.registration_price(), 100);
-    assert_eq!(config.tx_fee_per_byte_min(), 0);
+    assert_eq!(config.tx_fee_per_byte_min(), 1);
     assert_eq!(config.tx_fee_per_byte_max(), 1000);
     assert_eq!(config.deviation_replay_insertion_delay_ms(), 300_000);
     assert_eq!(config.replay_block_reward(), 100);
